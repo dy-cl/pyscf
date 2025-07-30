@@ -33,6 +33,7 @@ from functools import reduce
 import copy
 import numpy
 import pyscf.pbc
+import time
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.cc.kccsd_rhf import KRCCSD
 try:  # P
@@ -187,7 +188,6 @@ def write_eri(fout, eri, kconserv, tol=TOL,
                                     fout.write(output_format % (
                                         v.real, v.imag, nor*kp+i+1, nor*kq+j+1,
                                         nor*kr+k+1, nor*ks+l+1))
-
 
 def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
                              float_format=DEFAULT_FLOAT_FORMAT):
@@ -506,7 +506,11 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
             kstart = 0
     if comm != None:
         kstart = comm.bcast(kstart, root=0)
+    print(f'Calculating and writing exchange eris.', flush = True)
+    t0 = time.perf_counter()
     exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts)
+    t1 = time.perf_counter()
+    print(f'Calculating and writing exchange eris took: {t1 - t0:.6f} seconds.', flush = True)
     if rank == 0:
         fx.close()
         # MP meshes with an even number of points in a dimension do not contain
@@ -533,7 +537,11 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                        (numpy.asarray(mf.mo_coeff)[k].T.conj(),
                         mf.get_hcore()[k], numpy.asarray(mf.mo_coeff)[k]))
                 for k in range(kps)]
+        print(f'Calculating eris.', flush = True)
+        t0 = time.perf_counter()
         eris = dummy_cc.ao2mo()
+        t1 = time.perf_counter()
+        print(f'Calculating eris took: {t1 - t0:.6f} seconds.', flush = True)
         nel = sum(sum(mf.mo_occ))
         orbsym = []
         propsc = 2**npropbitlen
@@ -542,6 +550,8 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 propsc*propsc*scaled_kpts[k, 2]
             orbsym += [int(n)]*nmo
         nkpts = kgrid[0]*kgrid[1]*kgrid[2]
+        print(f'Writing eris.', flush = True)
+        t0 = time.perf_counter()
         from_integrals(fcid, h1es, eris, kps*nmo, nel, kconserv,
                        nkpts*mf.mol.energy_nuc(), 0, nprop, npropbitlen,
                        orbsym=orbsym)
@@ -554,3 +564,5 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 f.write(' (%.16g,%.16g) %4d %4d %4d %4d\n' %
                         (e.real, e.imag, n, 0, 0, 0))
         f.close()
+        t1 = time.perf_counter()
+        print(f'Writing eris took: {t1 - t0:.6f} seconds.', flush = True)
