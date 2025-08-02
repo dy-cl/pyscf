@@ -33,7 +33,7 @@ from functools import reduce
 import copy
 import numpy
 import pyscf.pbc
-import time
+import time, datetime, uuid, h5py
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.cc.kccsd_rhf import KRCCSD
 try:  # P
@@ -441,7 +441,7 @@ def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts):
 
 
 def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False,
-            parallel=None):
+            parallel=None, HDF5=False):
     '''Dump constant term, orb energies, 1-e and 2-e integrals to file.
 
     Args:
@@ -468,6 +468,9 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         parallel : bool
             If True, MPI parallelization will be used.
             The default is False.
+        HDF5 : bool 
+            If true, file written will be a suitable HANDE system HDF5 file 
+            rather than plain text FCIDUMP.
     '''
 
     if parallel:  # P
@@ -552,17 +555,38 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         nkpts = kgrid[0]*kgrid[1]*kgrid[2]
         print(f'Writing eris.', flush = True)
         t0 = time.perf_counter()
-        from_integrals(fcid, h1es, eris, kps*nmo, nel, kconserv,
-                       nkpts*mf.mol.energy_nuc(), 0, nprop, npropbitlen,
-                       orbsym=orbsym)
-        # Write orbital energies to fcid file, too.
-        f = open(fcid, 'a')
-        n = 0
-        for k in range(kps):
-            for e in mf.mo_energy[k]:
-                n += 1
-                f.write(' (%.16g,%.16g) %4d %4d %4d %4d\n' %
-                        (e.real, e.imag, n, 0, 0, 0))
-        f.close()
+        if HDF5:
+            with h5py.File(fcid + '.H5', 'w') as f:
+
+                group_metadata = f.create_group('/metadata')
+                timestamp = datetime.datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+                hande_version = '0000000000000000000000000000000000000000' # Dummy value 
+                sysdump_version = 0 # Dummy value 
+                ascii19 = h5py.string_dtype(encoding='ascii', length=19)
+                ascii36 = h5py.string_dtype(encoding='ascii', length=36)
+                ascii40 = h5py.string_dtype(encoding='ascii', length=40)
+                group_metadata.create_dataset('date', data=np.array(timestamp, dtype=ascii19))
+                group_metadata.create_dataset('hande version', data=np.array(hande_version, dtype=ascii40))
+                group_metadata.create_dataset('sysdump version', data=np.int32(sysdump_version))
+                group_metadata.create_dataset('uuid', data=np.array(str(uuid.uuid4()), dtype=ascii36))
+                
+                
+
+                group_system = f.create_group('/system')
+                group_basis = group_system.create_group('basis')
+                group_read_in = group_system.create_group('read_in')
+        if not HDF5:
+            from_integrals(fcid, h1es, eris, kps*nmo, nel, kconserv,
+                           nkpts*mf.mol.energy_nuc(), 0, nprop, npropbitlen,
+                           orbsym=orbsym)
+            # Write orbital energies to fcid file, too.
+            f = open(fcid, 'a')
+            n = 0
+            for k in range(kps):
+                for e in mf.mo_energy[k]:
+                    n += 1
+                    f.write(' (%.16g,%.16g) %4d %4d %4d %4d\n' %
+                            (e.real, e.imag, n, 0, 0, 0))
+            f.close()
         t1 = time.perf_counter()
         print(f'Writing eris took: {t1 - t0:.6f} seconds.', flush = True)
