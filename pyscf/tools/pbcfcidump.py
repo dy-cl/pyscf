@@ -91,6 +91,154 @@ def write_head(fout, nmo, nelec, ms, nprop, propbitlen, orbsym=None):
     fout.write('  ISYM=1,\n')
     fout.write(' &END\n')
 
+def get_eri(eri, kp, kq, kr, ks, i, j, k, l, no):
+
+    if i < no and j < no and k < no and l < no:
+        # oooo
+        v = eri.oooo[kp, kr, kq, i, k, j, l]
+    elif i < no and j < no and k < no and l >= no:
+        # ooov
+        v = eri.ooov[kp, kr, kq, i, k, j, l-no]
+    elif i < no and j < no and k >= no and l < no:
+        # iojokvlo => ovoo
+        v = eri.ooov[kq, ks, kp, j, l, i, k-no].conj()
+    elif i < no and j >= no and k < no and l < no:
+        # iojvkolo => oovo
+        v = eri.ooov[kr, kp, ks, k, i, l, j-no]
+    elif i >= no and j < no and k < no and l < no:
+        # vooo
+        v = eri.ooov[ks, kq, kr, l, j, k, i-no].conj()
+    elif i < no and j < no and k >= no and l >= no:
+        # iojokvlv => ovov
+        v = eri.ovov[kp, kr, kq, i, k-no, j, l-no]
+    elif i < no and j >= no and k < no and l >= no:
+        # iojvkolv => oovv
+        v = eri.oovv[kp, kr, kq, i, k, j-no, l-no]
+    elif i >= no and j < no and k < no and l >= no:
+        # voov
+        v = eri.voov[kp, kr, kq, i-no, k, j, l-no]
+    elif i < no and j >= no and k >= no and l < no:
+        # ovvo
+        v = eri.voov[kr, kp, ks, k-no, i, l, j-no]
+    elif i >= no and j < no and k >= no and l < no:
+        # ivjokvlo => vvoo
+        v = eri.oovv[kq, ks, kp, j, l, i-no, k-no].conj()
+    elif i >= no and j >= no and k < no and l < no:
+        # ivjvkolo => vovo
+        v = eri.ovov[kr, kp, ks, k, i-no, l, j-no]
+    elif i >= no and j >= no and k >= no and l < no:
+        # vvvo
+        v = eri.vovv[kq, ks, kp, j-no, l, i-no, k-no].conj()
+    elif i >= no and j >= no and k < no and l >= no:
+        # ivjvkolv => vovv
+        v = eri.vovv[kp, kr, kq, i-no, k, j-no, l-no]
+    elif i >= no and j < no and k >= no and l >= no:
+        # ivjokvlv => vvov
+        v = eri.vovv[ks, kq, kr, l-no, j, k-no, i-no].conj()
+    elif i < no and j >= no and k >= no and l >= no:
+        # ovvv
+        v = eri.vovv[kr, kp, ks, k-no, i, l-no, j-no]
+    elif i >= no and j >= no and k >= no and l >= no:
+        # vvvv
+        v = eri.vvvv[kp, kr, kq, i-no, k-no, j-no, l-no]
+    else:
+        raise RuntimeError()
+    return v
+
+def tri_ind(i, j):
+
+    return i * (i - 1) // 2 + j 
+
+def tri_ind_reorder(i, j):
+
+    if i >= j:
+        return tri_ind(i, j)
+    else:
+        return tri_ind(j, i)
+
+def get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping):
+
+    ii = mapping[kp*nor + i] + 1
+    aa = mapping[kq*nor + j] + 1
+    jj = mapping[kr*nor + k] + 1
+    bb = mapping[ks*nor + l] + 1
+    orbs = (ii, jj, aa, bb)
+    maxv = max(orbs)
+    maxv_n = sum(x == maxv for x in (ii, jj, aa, bb))
+    conj = False 
+    eswap = False
+    if maxv_n == 1:
+        conj = (maxv in (aa, bb))
+        eswap = (maxv in (jj, bb))
+    elif maxv_n > 1:
+        if ii == jj and ii == maxv:
+            conj = False 
+            eswap = bb > aa 
+        elif aa == bb and aa == maxv:
+            conj = True 
+            eswap = jj > ii 
+        elif ii == aa and ii == maxv:
+            conj = bb > jj
+            eswap = False 
+        elif ii == bb and ii == maxv:
+            conj = jj > aa 
+            eswap = conj 
+        elif jj == aa and jj == maxv:
+            conj = ii > bb
+            eswap = not conj 
+        elif jj == bb and jj == maxv: 
+            conj = ii < aa 
+            eswap = True 
+    if conj:
+        ii, aa = aa, ii 
+        jj, bb = bb, jj 
+    if eswap:
+        ii, jj = jj, ii 
+        aa, bb = bb, aa
+    ia = tri_ind(ii, aa)
+    jb = tri_ind_reorder(jj, bb)
+    # Index as spin orbitals with zero-based index 
+    if jj < bb:
+        index = 2 * tri_ind(ia, jb) - 1 
+    else:
+        index = 2 * tri_ind(ia, jb) - 2
+    return index
+
+def get_hande_index_exchange(i, j, k, l, kp, kq, kr, ks, nor, mapping):
+
+    ii = mapping[kp*nor + i] + 1
+    aa = mapping[kq*nor + j] + 1
+    jj = mapping[kr*nor + k] + 1
+    bb = mapping[ks*nor + l] + 1
+    orbs = (ii, jj, aa, bb)
+    maxv = max(orbs)
+    maxv_n = sum(x == maxv for x in (ii, jj, aa, bb))
+    conj = False 
+    eswap = False
+    if ii == bb:
+        if jj == aa:
+            if ii < jj:
+                eswap = True 
+        else:
+            if jj < aa:
+                conj = True 
+                eswap = True
+    elif jj == aa:
+        if ii < bb:
+            conj = True 
+        else:
+            eswap = True 
+
+    if conj:
+        ii, aa = aa, ii 
+        jj, bb = bb, jj 
+    if eswap:
+        ii, jj = jj, ii 
+        aa, bb = bb, aa
+
+    index_tri_ind = tri_ind(jj, aa) - 1 
+    index_repeat = ii - 1
+    return index_tri_ind, index_repeat
 
 def write_eri(fout, eri, kconserv, tol=TOL,
               float_format=DEFAULT_FLOAT_FORMAT):
@@ -133,61 +281,46 @@ def write_eri(fout, eri, kconserv, tol=TOL,
                         for k in range(nor):
                             for l in range(nor):
                                 # Stored as [ka,kc,kb,a,c,b,d] <- (ab|cd)
-                                # [todo] could move to another function
-                                if i < no and j < no and k < no and l < no:
-                                    # oooo
-                                    v = eri.oooo[kp, kr, kq, i, k, j, l]
-                                elif i < no and j < no and k < no and l >= no:
-                                    # ooov
-                                    v = eri.ooov[kp, kr, kq, i, k, j, l-no]
-                                elif i < no and j < no and k >= no and l < no:
-                                    # iojokvlo => ovoo
-                                    v = eri.ooov[kq, ks, kp, j, l, i, k-no].conj()
-                                elif i < no and j >= no and k < no and l < no:
-                                    # iojvkolo => oovo
-                                    v = eri.ooov[kr, kp, ks, k, i, l, j-no]
-                                elif i >= no and j < no and k < no and l < no:
-                                    # vooo
-                                    v = eri.ooov[ks, kq, kr, l, j, k, i-no].conj()
-                                elif i < no and j < no and k >= no and l >= no:
-                                    # iojokvlv => ovov
-                                    v = eri.ovov[kp, kr, kq, i, k-no, j, l-no]
-                                elif i < no and j >= no and k < no and l >= no:
-                                    # iojvkolv => oovv
-                                    v = eri.oovv[kp, kr, kq, i, k, j-no, l-no]
-                                elif i >= no and j < no and k < no and l >= no:
-                                    # voov
-                                    v = eri.voov[kp, kr, kq, i-no, k, j, l-no]
-                                elif i < no and j >= no and k >= no and l < no:
-                                    # ovvo
-                                    v = eri.voov[kr, kp, ks, k-no, i, l, j-no]
-                                elif i >= no and j < no and k >= no and l < no:
-                                    # ivjokvlo => vvoo
-                                    v = eri.oovv[kq, ks, kp, j, l, i-no, k-no].conj()
-                                elif i >= no and j >= no and k < no and l < no:
-                                    # ivjvkolo => vovo
-                                    v = eri.ovov[kr, kp, ks, k, i-no, l, j-no]
-                                elif i >= no and j >= no and k >= no and l < no:
-                                    # vvvo
-                                    v = eri.vovv[kq, ks, kp, j-no, l, i-no, k-no].conj()
-                                elif i >= no and j >= no and k < no and l >= no:
-                                    # ivjvkolv => vovv
-                                    v = eri.vovv[kp, kr, kq, i-no, k, j-no, l-no]
-                                elif i >= no and j < no and k >= no and l >= no:
-                                    # ivjokvlv => vvov
-                                    v = eri.vovv[ks, kq, kr, l-no, j, k-no, i-no].conj()
-                                elif i < no and j >= no and k >= no and l >= no:
-                                    # ovvv
-                                    v = eri.vovv[kr, kp, ks, k-no, i, l-no, j-no]
-                                elif i >= no and j >= no and k >= no and l >= no:
-                                    # vvvv
-                                    v = eri.vvvv[kp, kr, kq, i-no, k-no, j-no, l-no]
-                                else:
-                                    raise RuntimeError()
+                                v = get_eri(eri, kp, kq, kr, ks, i, j, k, l, no)
                                 if abs(v) > tol:
                                     fout.write(output_format % (
                                         v.real, v.imag, nor*kp+i+1, nor*kq+j+1,
                                         nor*kr+k+1, nor*ks+l+1))
+
+def write_eri_HDF5(group_integrals, eri, kconserv, mapping, tol=TOL):
+    '''Write electron repulsion integrals (ERIs) to system .H5.'''
+
+    nkpts = eri.oooo.shape[0]
+    no = eri.oooo.shape[-1]
+    nv = eri.vvvv.shape[-1]
+    nor = no+nv
+    nspat = len(mapping)
+    nuniq = nspat * (nspat + 1) // 2
+    npair = nuniq * (nuniq + 1) // 2
+    ntotal  = 2 * npair
+    coulomb_ints_real, coulomb_ints_imag = numpy.zeros((ntotal), dtype=numpy.float64), numpy.zeros((ntotal), dtype=numpy.float64)
+    for kp in range(nkpts):
+        for kq in range(nkpts):
+            for kr in range(nkpts):
+                ks = kconserv[kp, kq, kr]
+                # The documentation in pyscf/pbc/lib/kpts_helper.py in
+                # get_kconserv is inconsistent with the actual code (and
+                # physics). [k*(1) l(1) | m*(2) n(2)] = <km|ln> is the
+                # integral. kconserve gives n given klm, such that
+                # l-k=n-m (not k-l=n-m)
+                for i in range(nor):
+                    for j in range(nor):
+                        for k in range(nor):
+                            for l in range(nor):
+                                # Stored as [ka,kc,kb,a,c,b,d] <- (ab|cd)
+                                v = get_eri(eri, kp, kq, kr, ks, i, j, k, l, no)
+                                index = get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping)
+                                if abs(v) > tol:
+                                    coulomb_ints_real[index] = v.real 
+                                    coulomb_ints_imag[index] = v.imag
+    group_integrals.create_dataset('coulomb_ints_im_ispin01', data=coulomb_ints_imag)  
+    group_integrals.create_dataset('coulomb_ints_ispin01', data=coulomb_ints_real)    
+
 
 def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
                              float_format=DEFAULT_FLOAT_FORMAT):
@@ -225,6 +358,28 @@ def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
                                 v.real, v.imag, nor*ki+i+1, nor*kj+j+1,
                                 nor*kk+k+1, nor*ki+i+1))
 
+def write_exchange_integrals_HDF5(group_integrals, xints, ki, nkpts, nor, mapping, tol=TOL):
+
+    nspat = len(mapping)
+    nuniq = nspat * (nspat + 1) // 2
+    # Are the H5 groups already defined? 
+    if 'additional_exchange_ints_ispin01' in group_integrals:
+        exchange_ints_imag = group_integrals['additional_exchange_ints_im_ispin01']
+        exchange_ints_real = group_integrals['additional_exchange_ints_ispin01']
+    else:
+        exchange_ints_imag = group_integrals.create_dataset('additional_exchange_ints_im_ispin01', shape=(nuniq, nspat), dtype=numpy.float64)
+        exchange_ints_real = group_integrals.create_dataset('additional_exchange_ints_ispin01', shape=(nuniq, nspat), dtype=numpy.float64)
+    
+    for kj in range(nkpts):
+        for kk in range(nkpts):
+            for i in range(nor):
+                for j in range(nor):
+                    for k in range(nor):
+                        v = xints[i, kj*nor+j, kk*nor+k]/nkpts
+                        index_tri_ind, index_repeat = get_hande_index_exchange(i, j, k, i, ki, kj, kk, ki, nor, mapping)
+                        if abs(v) > tol:
+                            exchange_ints_real[index_tri_ind, index_repeat] = v.real
+                            exchange_ints_imag[index_tri_ind, index_repeat] = v.imag
 
 def write_hcore(fout, h, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
     '''Write the <i|h|j> integrals to FCIDUMP file.
@@ -334,7 +489,7 @@ def _partition(part, rank, nmo, size, nkpts, ntot):  # p
     return nar, l, dspls, counts  # p
 
 
-def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts):
+def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts, group_integrals=None, mapping=None, HDF5=False):
     '''Calculate <pi|iq>_x exchange integrals.
 
     Args:
@@ -357,6 +512,13 @@ def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts):
             Were found using cell.get_abs_kpts(scaled_kpts).
             Absolute k-points in 1/Bohr.
             [todo]
+        group_integrals : ? 
+            HDF5 file group to which the above integrals are written.
+        mapping : Dict 
+            Map between PySCF basis ordering and HANDE basis ordering.
+        HDF5 : bool 
+            Whether or not to also write the exchange integrals to HANDE 
+            compatible .H5 file.
     '''
     if comm == None:  # P
         rank = 0
@@ -436,8 +598,11 @@ def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts):
                          root=0)  # P
         if rank == 0:
             xints = xints.reshape((nmo, ntot, ntot))
-            write_exchange_integrals(fout, xints, ik, nkpts, nmo)
-            fout.flush()
+            if fout is not None:
+                write_exchange_integrals(fout, xints, ik, nkpts, nmo)
+                fout.flush()
+            if HDF5: 
+                write_exchange_integrals_HDF5(group_integrals, xints, ik, nkpts, nmo, mapping)
 
 
 def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False,
@@ -493,6 +658,7 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         rank = comm.Get_rank()  # P
     kconserv = dummy_cc.khelper.kconserv
     nmo = len(mf.mo_coeff[0])
+    kps = len(mf.mo_coeff)
     fx = None
     kstart = None
     if rank == 0:
@@ -511,7 +677,34 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         kstart = comm.bcast(kstart, root=0)
     print(f'Calculating and writing exchange eris.', flush = True)
     t0 = time.perf_counter()
-    exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts)
+    if HDF5:
+        if rank == 0:
+            with h5py.File(fcid + '.H5', 'w') as f:
+                group_system = f.create_group('/system')
+                group_read_in = group_system.create_group('read_in')
+                group_integrals = group_read_in.create_group('integrals')
+                # Sort spin orbitals by global energy ordering (HANDE convention).
+                orbs = []
+                original_index = 0
+                for k in range(kps):
+                    for p, e in enumerate(mf.mo_energy[k]):
+                        orbs.append((e, k, p, original_index))
+                        original_index += 1
+                orbs.sort(key = lambda t: t[0].real)
+                mapping = {}
+                for spatial_idx, (_, _, _, orig) in enumerate(orbs):
+                    mapping[orig] = spatial_idx # Mapping from the original k-point grouped ordering to HANDEs global energy ordering of spatial orbitals
+                spin_orbs = []
+                for i, (e, k, p, original_index) in enumerate(orbs, start = 1):
+                    # Spin orbitals may be constructed in this way as we consider only RHF for now.
+                    spin_orbs.append(dict(spin_idx = 2 * i - 1, spin = 1, spatial_idx = i, energy = e, k = k, p = p))
+                    spin_orbs.append(dict(spin_idx = 2 * i, spin = -1, spatial_idx = i, energy = e, k = k, p = p))
+                nbasis = numpy.int32(len(spin_orbs))
+                exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts, group_integrals=group_integrals, mapping=mapping, HDF5=HDF5)
+        else:
+                exchange_integrals(comm, mf, nmo, kconserv, None, kstart, mf.kpts, group_integrals=None, mapping=None, HDF5=True)
+    else:
+        exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts, group_integrals=None, mapping=None, HDF5=False)
     t1 = time.perf_counter()
     print(f'Calculating and writing exchange eris took: {t1 - t0:.6f} seconds.', flush = True)
     if rank == 0:
@@ -531,7 +724,6 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         for i, nk in enumerate(nprop):
             for j in range(scaled_kpts.shape[0]):
                 scaled_kpts[j, i] = int(round(scaled_kpts[j, i]*nk)) % nk
-        kps = len(mf.mo_coeff)
         # For each k-point, get the G-space core hamiltonian, and transform it
         # into the molecular orbital basis.
         # Different k-points don't couple.
@@ -556,8 +748,7 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         print(f'Writing eris.', flush = True)
         t0 = time.perf_counter()
         if HDF5:
-            with h5py.File(fcid + '.H5', 'w') as f:
-
+            with h5py.File(fcid + '.H5', 'a') as f:
                 group_metadata = f.create_group('/metadata')
                 timestamp = datetime.datetime.now().strftime("%H:%M:%S %d/%m/%Y")
                 hande_version = '0000000000000000000000000000000000000000' # Dummy value 
@@ -565,16 +756,63 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 ascii19 = h5py.string_dtype(encoding='ascii', length=19)
                 ascii36 = h5py.string_dtype(encoding='ascii', length=36)
                 ascii40 = h5py.string_dtype(encoding='ascii', length=40)
-                group_metadata.create_dataset('date', data=np.array(timestamp, dtype=ascii19))
-                group_metadata.create_dataset('hande version', data=np.array(hande_version, dtype=ascii40))
-                group_metadata.create_dataset('sysdump version', data=np.int32(sysdump_version))
-                group_metadata.create_dataset('uuid', data=np.array(str(uuid.uuid4()), dtype=ascii36))
-                
-                
+                ascii255 = h5py.string_dtype(encoding='ascii', length=255)
+                group_metadata.create_dataset('date', data=numpy.array(timestamp, dtype=ascii19))
+                group_metadata.create_dataset('hande version', data=numpy.array(hande_version, dtype=ascii40))
+                group_metadata.create_dataset('sysdump version', data=numpy.int32(sysdump_version))
+                group_metadata.create_dataset('uuid', data=numpy.array(str(uuid.uuid4()), dtype=ascii36))
 
-                group_system = f.create_group('/system')
+                group_system = f['/system']
+                group_read_in = group_system['read_in']
+                group_integrals = group_read_in['integrals']
+                
+                CAS = numpy.array([-1, -1]) # Can define CAS here if need be, [-1, -1] indicates use of all space. 
+                Ms = 0 # Ms is 0 for RHF.
+                group_system.create_dataset('CAS', data=CAS, dtype=numpy.int32)
+                group_system.create_dataset('Ms', data=Ms, dtype=numpy.int32)
+                
+                basis_l_numbers = numpy.zeros((3, nbasis), dtype=numpy.int32)
+                for col, orb in enumerate(spin_orbs):
+                    kvec = scaled_kpts[orb['k']]
+                    basis_l_numbers[:, col] = kvec
+                basis_lz = numpy.zeros((nbasis), dtype=numpy.int32) # FCIDUMP orbitals do not commute with Lz --> ignore this symmetry.
+                basis_ms = numpy.array([orb['spin'] for orb in spin_orbs], dtype=numpy.int32)
+                basis_sp_eigv = numpy.array([orb['energy'] for orb in spin_orbs], dtype=numpy.float64)
+                basis_spatial_index = numpy.array([orb['spatial_idx'] for orb in spin_orbs], dtype=numpy.float64)
+                basis_symmetry = numpy.array([1 + scaled_kpts[orb['k']][0] + nprop[0] * scaled_kpts[orb['k']][1] + nprop[0] * nprop[1] * scaled_kpts[orb['k']][2] 
+                                             for orb in spin_orbs], dtype=numpy.int32)
+                basis_symmetry_index = numpy.zeros((nbasis), dtype=numpy.int32) # Only used for point group symmetry i.e., not periodic systems
+                basis_symmetry_spin_index = numpy.zeros((nbasis), dtype=numpy.int32)
+                counter = {}
+                for i, orb in enumerate(spin_orbs):
+                    key = (basis_symmetry[i], orb['spin'])
+                    n = counter.get(key, 1)
+                    basis_symmetry_spin_index[i] = n 
+                    counter[key] = n + 1
+
                 group_basis = group_system.create_group('basis')
-                group_read_in = group_system.create_group('read_in')
+                group_basis.create_dataset('basis_l_numbers', data=basis_l_numbers)
+                group_basis.create_dataset('basis_lz', data=basis_lz)
+                group_basis.create_dataset('basis_ms', data=basis_ms)
+                group_basis.create_dataset('basis_sp_eigv', data=basis_sp_eigv)
+                group_basis.create_dataset('basis_spatial_index', data=basis_spatial_index)
+                group_basis.create_dataset('basis_symmetry', data=basis_symmetry)
+                group_basis.create_dataset('basis_symmetry_index', data=basis_symmetry_index)
+                group_basis.create_dataset('basis_symmetry_spin_index', data=basis_symmetry_spin_index)
+                group_basis.create_dataset('nbasis', data=nbasis)
+
+                group_system.create_dataset('momentum_space', data=numpy.int32(1)) # 1 for true 
+                group_system.create_dataset('nelectrons', data=numpy.int32(nel))
+
+                ecore_val = nkpts * mf.mol.energy_nuc()
+                group_read_in.create_dataset('comp', data=numpy.int32(1)) # eris will be complex valued 
+                group_read_in.create_dataset('ecore', data=numpy.array(ecore_val, dtype=numpy.float64))
+                group_read_in.create_dataset('ex_exchange_ints', data=numpy.int32(1))  # Exchange ints written
+                group_read_in.create_dataset('fcidump', data=numpy.array(fcid, dtype=ascii255))
+                group_read_in.create_dataset('ex_fcidump', data=numpy.array(fcid + '_X', dtype=ascii255))
+                
+                write_eri_HDF5(group_integrals, eris, kconserv, mapping, tol=TOL)
+               
         if not HDF5:
             from_integrals(fcid, h1es, eris, kps*nmo, nel, kconserv,
                            nkpts*mf.mol.energy_nuc(), 0, nprop, npropbitlen,
