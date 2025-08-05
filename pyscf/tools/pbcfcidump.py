@@ -33,7 +33,7 @@ from functools import reduce
 import copy
 import numpy
 import pyscf.pbc
-import time, datetime, uuid, h5py
+import datetime, uuid, h5py
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.cc.kccsd_rhf import KRCCSD
 try:  # P
@@ -92,7 +92,19 @@ def write_head(fout, nmo, nelec, ms, nprop, propbitlen, orbsym=None):
     fout.write(' &END\n')
 
 def get_eri(eri, kp, kq, kr, ks, i, j, k, l, no):
+    '''Get electron repulsion integrals (ERIs) for a given set of orbitals.
 
+    Args:
+        eri : numpy array
+            Contains ERIs divided by number of k points, with indices
+            [ka,kc,kb,a,c,b,d].
+        kp, kq, kr, ks : int 
+            k-point indices of each orbital. 
+        i, j, k, l : int
+            Global orbital indices. 
+        no : int 
+            Number of occupied orbitals. 
+    '''
     if i < no and j < no and k < no and l < no:
         # oooo
         v = eri.oooo[kp, kr, kq, i, k, j, l]
@@ -146,18 +158,42 @@ def get_eri(eri, kp, kq, kr, ks, i, j, k, l, no):
     return v
 
 def tri_ind(i, j):
+    ''' Calculate index of element (i, j) in upper triangule of symmetric matrix.
 
+    Args: 
+        i : int 
+            Row index.
+        j : int 
+            Column index.
+    '''
     return i * (i - 1) // 2 + j 
 
 def tri_ind_reorder(i, j):
-
+    ''' Calculate index of element (i, j) in upper triangule of symmetric matrix with reordering of indices.
+    Args: 
+        i : int 
+            Row index.
+        j : int 
+            Column index.
+    '''
     if i >= j:
         return tri_ind(i, j)
     else:
         return tri_ind(j, i)
 
 def get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping):
+    ''' Calculate HANDE storage index of a Coulomb integral. 
 
+    Args:
+        kp, kq, kr, ks : int 
+            k-point indices of each orbital. 
+        i, j, k, l : int
+            Global orbital indices. 
+        nor : int 
+            Number of orbitals.
+        mapping: dict
+            Maps the PySCF orbital indices to those seen by HANDE.
+    '''
     ii = mapping[kp*nor + i] + 1
     aa = mapping[kq*nor + j] + 1
     jj = mapping[kr*nor + k] + 1
@@ -205,7 +241,18 @@ def get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping):
     return index
 
 def get_hande_index_exchange(i, j, k, l, kp, kq, kr, ks, nor, mapping):
+    ''' Calculate HANDE storage index of an exchange integral. 
 
+    Args:
+        kp, kq, kr, ks : int 
+            k-point indices of each orbital. 
+        i, j, k, l : int
+            Global orbital indices. 
+        nor : int 
+            Number of orbitals.
+        mapping: dict
+            Maps the PySCF orbital indices to those seen by HANDE.
+    '''
     ii = mapping[kp*nor + i] + 1
     aa = mapping[kq*nor + j] + 1
     jj = mapping[kr*nor + k] + 1
@@ -288,8 +335,25 @@ def write_eri(fout, eri, kconserv, tol=TOL,
                                         nor*kr+k+1, nor*ks+l+1))
 
 def write_eri_HDF5(group_integrals, eri, kconserv, mapping, tol=TOL):
-    '''Write electron repulsion integrals (ERIs) to system .H5.'''
+    '''Write electron repulsion integrals (ERIs) to system .H5.
+    
+    Args:
+        group_integrals : h5py.Group 
+            HDF5 group which stores the integrals.
+        eri : numpy array
+            Contains ERIs divided by number of k points, with indices
+            [ka,kc,kb,a,c,b,d].
+        kconserv : function
+            Pass in three k point indices and get fourth one where
+            overall momentum is conserved.
+        mapping: dict
+            Maps the PySCF orbital indices to those seen by HANDE.
 
+    Kwargs:
+        tol : float, optional
+            Below this value integral is not written to file.
+            The default is TOL.
+    '''
     nkpts = eri.oooo.shape[0]
     no = eri.oooo.shape[-1]
     nv = eri.vvvv.shape[-1]
@@ -317,7 +381,7 @@ def write_eri_HDF5(group_integrals, eri, kconserv, mapping, tol=TOL):
                                 index = get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping)
                                 if abs(v) > tol:
                                     coulomb_ints_real[index] = v.real 
-                                    coulomb_ints_imag[index] = v.imag
+                                    coulomb_ints_imag[index] = 0
     group_integrals.create_dataset('coulomb_ints_im_ispin01', data=coulomb_ints_imag)  
     group_integrals.create_dataset('coulomb_ints_ispin01', data=coulomb_ints_real)    
 
@@ -337,6 +401,8 @@ def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
             Number of k points
         nor : int
             Number of orbitals at a k point.
+        mapping: dict
+            Maps the PySCF orbital indices to those seen by HANDE.
 
     Kwargs:
         tol : float, optional
@@ -359,6 +425,25 @@ def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
                                 nor*kk+k+1, nor*ki+i+1))
 
 def write_exchange_integrals_HDF5(group_integrals, xints, ki, nkpts, nor, mapping, tol=TOL):
+    '''Write extra exchange electron repulsion integrals to system .H5.
+
+    Args:
+        group_integrals : h5py.Group 
+            HDF5 group which stores the integrals.
+        xints : numpy array, dim: (MO at k point, all MO, all MO)
+            extra exchange integrals <pi|iq>_x
+        ki : int
+            k index for orb i in <pi|iq>_x
+        nkpts : int
+            Number of k points
+        nor : int
+            Number of orbitals at a k point.
+
+    Kwargs:
+        tol : float, optional
+            Below this value integral is not written to file.
+            The default is TOL.
+    '''
 
     nspat = len(mapping)
     nuniq = nspat * (nspat + 1) // 2
@@ -379,7 +464,7 @@ def write_exchange_integrals_HDF5(group_integrals, xints, ki, nkpts, nor, mappin
                         index_tri_ind, index_repeat = get_hande_index_exchange(i, j, k, i, ki, kj, kk, ki, nor, mapping)
                         if abs(v) > tol:
                             exchange_ints_real[index_tri_ind, index_repeat] = v.real
-                            exchange_ints_imag[index_tri_ind, index_repeat] = v.imag
+                            exchange_ints_imag[index_tri_ind, index_repeat] = 0
 
 def write_hcore(fout, h, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
     '''Write the <i|h|j> integrals to FCIDUMP file.
@@ -604,6 +689,17 @@ def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts, group_integr
             if HDF5: 
                 write_exchange_integrals_HDF5(group_integrals, xints, ik, nkpts, nmo, mapping)
 
+def insertion_rank(arr, tol=1e-12):
+    n = len(arr)
+    rank = list(range(n))
+    for i in range(1, n):
+        tmp = rank[i]
+        j = i - 1
+        while j >= 0 and (arr[rank[j]] - arr[tmp]) >= tol:
+            rank[j+1] = rank[j]
+            j -= 1
+        rank[j+1] = tmp
+    return rank  
 
 def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False,
             parallel=None, HDF5=False):
@@ -662,64 +758,20 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
     fx = None
     kstart = None
     if rank == 0:
-        if resume:
-            fx = open(fcid+"_X", 'r')
-            lines = fx.readlines()
-            line = lines[-1].split()
-            kstart = (int(line[1])-1)/nmo + 1
-            print("Resuming dumping, starting at k point " + str(kstart))
-            fx.close()
-            fx = open(fcid+"_X", 'a')
+        if not HDF5:
+            if resume:
+                fx = open(fcid+"_X", 'r')
+                lines = fx.readlines()
+                line = lines[-1].split()
+                kstart = (int(line[1])-1)/nmo + 1
+                print("Resuming dumping, starting at k point " + str(kstart))
+                fx.close()
+                fx = open(fcid+"_X", 'a')
+            else:
+                fx = open(fcid+"_X", 'w')
+                kstart = 0
         else:
-            fx = open(fcid+"_X", 'w')
             kstart = 0
-    if comm != None:
-        kstart = comm.bcast(kstart, root=0)
-    print(f'Calculating and writing exchange eris.', flush = True)
-    t0 = time.perf_counter()
-    if HDF5:
-        if rank == 0:
-            with h5py.File(fcid + '.H5', 'w') as f:
-                group_system = f.create_group('/system')
-                group_read_in = group_system.create_group('read_in')
-                group_integrals = group_read_in.create_group('integrals')
-                # Sort spin orbitals by global energy ordering (HANDE convention).
-                orbs = []
-                original_index = 0
-                for k in range(kps):
-                    for p, e in enumerate(mf.mo_energy[k]):
-                        orbs.append((e, k, p, original_index))
-                        original_index += 1
-                orbs.sort(key = lambda t: t[0].real)
-                mapping = {}
-                for spatial_idx, (_, _, _, orig) in enumerate(orbs):
-                    mapping[orig] = spatial_idx # Mapping from the original k-point grouped ordering to HANDEs global energy ordering of spatial orbitals
-                spin_orbs = []
-                for i, (e, k, p, original_index) in enumerate(orbs, start = 1):
-                    # Spin orbitals may be constructed in this way as we consider only RHF for now.
-                    spin_orbs.append(dict(spin_idx = 2 * i - 1, spin = 1, spatial_idx = i, energy = e, k = k, p = p))
-                    spin_orbs.append(dict(spin_idx = 2 * i, spin = -1, spatial_idx = i, energy = e, k = k, p = p))
-                nbasis = numpy.int32(len(spin_orbs))
-                exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts, group_integrals=group_integrals, mapping=mapping, HDF5=HDF5)
-        else:
-                exchange_integrals(comm, mf, nmo, kconserv, None, kstart, mf.kpts, group_integrals=None, mapping=None, HDF5=True)
-    else:
-        exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts, group_integrals=None, mapping=None, HDF5=False)
-    t1 = time.perf_counter()
-    print(f'Calculating and writing exchange eris took: {t1 - t0:.6f} seconds.', flush = True)
-    if rank == 0:
-        fx.close()
-        # MP meshes with an even number of points in a dimension do not contain
-        # the Gamma point.
-        # Unfortunately this is not compatible with some symmetry
-        # specifications, so if we multiply that dimension's kpoint grid by 2,
-        # we get a grid which can contain both the MP mesh and the Gamma point
-        # (even though we don't have any actual orbitals calculated at the
-        # gamma point).
-        if MP:
-            for i in range(3):
-                if nprop[i] % 2 == 0:
-                    nprop[i] *= 2
         npropbitlen = 8
         for i, nk in enumerate(nprop):
             for j in range(scaled_kpts.shape[0]):
@@ -732,11 +784,53 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                        (numpy.asarray(mf.mo_coeff)[k].T.conj(),
                         mf.get_hcore()[k], numpy.asarray(mf.mo_coeff)[k]))
                 for k in range(kps)]
-        print(f'Calculating eris.', flush = True)
-        t0 = time.perf_counter()
+    if comm != None:
+        kstart = comm.bcast(kstart, root=0)
+    if HDF5:
+        if rank == 0:
+            with h5py.File(fcid + '.H5', 'w') as f:
+                group_system = f.create_group('/system')
+                group_read_in = group_system.create_group('read_in')
+                group_integrals = group_read_in.create_group('integrals')
+                # Sort spin orbitals by global energy ordering (HANDE convention).
+                orbs = []
+                original_index = 0
+                for k_index in range(kps):
+                    for p, e in enumerate(mf.mo_energy[k_index]):
+                        orbs.append((e, k_index, scaled_kpts[k_index], p, original_index))
+                        original_index += 1
+                energies = [e.real for k in mf.mo_energy for e in k]             
+                ranking = insertion_rank(energies, tol=1e-12)
+                orbs = [orbs[i] for i in ranking]
+                mapping = {}
+                for spatial_idx, (_, _, _, _, orig) in enumerate(orbs):
+                    mapping[orig] = spatial_idx # Mapping from the original k-point grouped ordering to HANDEs global energy ordering of spatial orbitals
+                spin_orbs = []
+                for i, (e, k, k_vec, p, original_index) in enumerate(orbs, start = 1):
+                    # Spin orbitals may be constructed in this way as we consider only RHF for now.
+                    spin_orbs.append(dict(spin_idx = 2 * i - 1, spin = 1, spatial_idx = i, energy = e, k = k, k_vec = k_vec, p = p))
+                    spin_orbs.append(dict(spin_idx = 2 * i, spin = -1, spatial_idx = i, energy = e, k = k, k_vec = k_vec, p = p))
+                nbasis = numpy.int32(len(spin_orbs))
+                exchange_integrals(comm, mf, nmo, kconserv, None, kstart, mf.kpts, group_integrals=group_integrals, mapping=mapping, HDF5=HDF5)
+        else:
+                exchange_integrals(comm, mf, nmo, kconserv, None, kstart, mf.kpts, group_integrals=None, mapping=None, HDF5=True)
+    else:
+        exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts, group_integrals=None, mapping=None, HDF5=False)
+    if rank == 0:
+        if not HDF5:
+            fx.close()
+        # MP meshes with an even number of points in a dimension do not contain
+        # the Gamma point.
+        # Unfortunately this is not compatible with some symmetry
+        # specifications, so if we multiply that dimension's kpoint grid by 2,
+        # we get a grid which can contain both the MP mesh and the Gamma point
+        # (even though we don't have any actual orbitals calculated at the
+        # gamma point).
+        if MP:
+            for i in range(3):
+                if nprop[i] % 2 == 0:
+                    nprop[i] *= 2
         eris = dummy_cc.ao2mo()
-        t1 = time.perf_counter()
-        print(f'Calculating eris took: {t1 - t0:.6f} seconds.', flush = True)
         nel = sum(sum(mf.mo_occ))
         orbsym = []
         propsc = 2**npropbitlen
@@ -745,8 +839,6 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 propsc*propsc*scaled_kpts[k, 2]
             orbsym += [int(n)]*nmo
         nkpts = kgrid[0]*kgrid[1]*kgrid[2]
-        print(f'Writing eris.', flush = True)
-        t0 = time.perf_counter()
         if HDF5:
             with h5py.File(fcid + '.H5', 'a') as f:
                 group_metadata = f.create_group('/metadata')
@@ -761,16 +853,13 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 group_metadata.create_dataset('hande version', data=numpy.array(hande_version, dtype=ascii40))
                 group_metadata.create_dataset('sysdump version', data=numpy.int32(sysdump_version))
                 group_metadata.create_dataset('uuid', data=numpy.array(str(uuid.uuid4()), dtype=ascii36))
-
                 group_system = f['/system']
                 group_read_in = group_system['read_in']
                 group_integrals = group_read_in['integrals']
-                
                 CAS = numpy.array([-1, -1]) # Can define CAS here if need be, [-1, -1] indicates use of all space. 
                 Ms = 0 # Ms is 0 for RHF.
                 group_system.create_dataset('CAS', data=CAS, dtype=numpy.int32)
                 group_system.create_dataset('Ms', data=Ms, dtype=numpy.int32)
-                
                 basis_l_numbers = numpy.zeros((3, nbasis), dtype=numpy.int32)
                 for col, orb in enumerate(spin_orbs):
                     kvec = scaled_kpts[orb['k']]
@@ -778,9 +867,9 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 basis_lz = numpy.zeros((nbasis), dtype=numpy.int32) # FCIDUMP orbitals do not commute with Lz --> ignore this symmetry.
                 basis_ms = numpy.array([orb['spin'] for orb in spin_orbs], dtype=numpy.int32)
                 basis_sp_eigv = numpy.array([orb['energy'] for orb in spin_orbs], dtype=numpy.float64)
-                basis_spatial_index = numpy.array([orb['spatial_idx'] for orb in spin_orbs], dtype=numpy.float64)
-                basis_symmetry = numpy.array([1 + scaled_kpts[orb['k']][0] + nprop[0] * scaled_kpts[orb['k']][1] + nprop[0] * nprop[1] * scaled_kpts[orb['k']][2] 
-                                             for orb in spin_orbs], dtype=numpy.int32)
+                basis_spatial_index = numpy.array([orb['spatial_idx'] for orb in spin_orbs], dtype=numpy.int32)
+                basis_symmetry = numpy.array([1 + scaled_kpts[orb['k']][0] + nprop[0] * scaled_kpts[orb['k']][1] 
+                                                + nprop[0] * nprop[1] * scaled_kpts[orb['k']][2] for orb in spin_orbs], dtype=numpy.int32)
                 basis_symmetry_index = numpy.zeros((nbasis), dtype=numpy.int32) # Only used for point group symmetry i.e., not periodic systems
                 basis_symmetry_spin_index = numpy.zeros((nbasis), dtype=numpy.int32)
                 counter = {}
@@ -789,7 +878,6 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                     n = counter.get(key, 1)
                     basis_symmetry_spin_index[i] = n 
                     counter[key] = n + 1
-
                 group_basis = group_system.create_group('basis')
                 group_basis.create_dataset('basis_l_numbers', data=basis_l_numbers)
                 group_basis.create_dataset('basis_lz', data=basis_lz)
@@ -800,19 +888,50 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 group_basis.create_dataset('basis_symmetry_index', data=basis_symmetry_index)
                 group_basis.create_dataset('basis_symmetry_spin_index', data=basis_symmetry_spin_index)
                 group_basis.create_dataset('nbasis', data=nbasis)
-
                 group_system.create_dataset('momentum_space', data=numpy.int32(1)) # 1 for true 
                 group_system.create_dataset('nelectrons', data=numpy.int32(nel))
-
-                ecore_val = nkpts * mf.mol.energy_nuc()
+                ecore_val = numpy.array([nkpts * mf.mol.energy_nuc()])
                 group_read_in.create_dataset('comp', data=numpy.int32(1)) # eris will be complex valued 
                 group_read_in.create_dataset('ecore', data=numpy.array(ecore_val, dtype=numpy.float64))
                 group_read_in.create_dataset('ex_exchange_ints', data=numpy.int32(1))  # Exchange ints written
                 group_read_in.create_dataset('fcidump', data=numpy.array(fcid, dtype=ascii255))
                 group_read_in.create_dataset('ex_fcidump', data=numpy.array(fcid + '_X', dtype=ascii255))
-                
                 write_eri_HDF5(group_integrals, eris, kconserv, mapping, tol=TOL)
-               
+                xints_real = f['/system/read_in/integrals/additional_exchange_ints_ispin01']
+                xints_imag = f['/system/read_in/integrals/additional_exchange_ints_im_ispin01']
+                coulomb_ints_real = f['/system/read_in/integrals/coulomb_ints_ispin01']
+                coulomb_ints_imag = f['/system/read_in/integrals/coulomb_ints_im_ispin01']
+                occ_k = [[i for i,occ in enumerate(mf.mo_occ[k]) if occ > 1e-8] for k in range(kps)]
+                for k in range(kps):
+                    H = h1es[k].astype(numpy.complex128)
+                    delta = numpy.zeros_like(H, dtype=numpy.complex128)
+                    for a in range(nmo):
+                        for b in range(nmo):
+                            JR = JI = KR = KI = 0.0
+                            for ki in range(kps):
+                                for i in range(nmo):
+                                    j_idx = get_hande_index_coulomb(i, b, a, i, ki, k, k, ki, nmo, mapping)
+                                    JR += coulomb_ints_real[j_idx]
+                                    JI += coulomb_ints_imag[j_idx]
+                                    tri, rep = get_hande_index_exchange(i, b, a, i, ki, k, k, ki, nmo, mapping)
+                                    KR += xints_real[tri, rep]
+                                    KI += xints_imag[tri, rep]
+                            delta[a, b] = -0.5*((KR - JR) + 1j*(KI - JI))
+                    H += delta 
+                    isym = int(1 + (scaled_kpts[k,0]) + nprop[0]*scaled_kpts[k,1] + nprop[0]*nprop[1]*scaled_kpts[k,2])
+                    re_upper = [] 
+                    im_upper = []
+                    for j in range(nmo):
+                        for i in range(j + 1):
+                            hij = H[i, j]
+                            re_upper.append(0.0 if abs(hij.real) < TOL else hij.real)
+                            im_upper.append(hij.imag)
+                    group_integrals.create_dataset(f'one_body_ispin01_isym{isym:02d}', data=numpy.asarray(re_upper, dtype=numpy.float64))
+                    group_integrals.create_dataset(f'one_body_im_ispin01_isym{isym:02d}', data=numpy.array(im_upper, dtype=numpy.float64))
+                group_read_in.create_dataset('nprop', data=numpy.array(nprop, dtype=numpy.int32))
+                group_read_in.create_dataset('uhf', data=numpy.int32(0)) # Only considering RHF 
+                group_read_in.create_dataset('uselz', data=numpy.int32(0)) # Not using Lz symmetry
+                group_system.create_dataset('system', data=numpy.int32(2)) # read_in enum parameter in HANDE is 2
         if not HDF5:
             from_integrals(fcid, h1es, eris, kps*nmo, nel, kconserv,
                            nkpts*mf.mol.energy_nuc(), 0, nprop, npropbitlen,
@@ -826,5 +945,3 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                     f.write(' (%.16g,%.16g) %4d %4d %4d %4d\n' %
                             (e.real, e.imag, n, 0, 0, 0))
             f.close()
-        t1 = time.perf_counter()
-        print(f'Writing eris took: {t1 - t0:.6f} seconds.', flush = True)
