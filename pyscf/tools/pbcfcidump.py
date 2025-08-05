@@ -381,7 +381,7 @@ def write_eri_HDF5(group_integrals, eri, kconserv, mapping, tol=TOL):
                                 index = get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping)
                                 if abs(v) > tol:
                                     coulomb_ints_real[index] = v.real 
-                                    coulomb_ints_imag[index] = 0
+                                    coulomb_ints_imag[index] = v.imag
     group_integrals.create_dataset('coulomb_ints_im_ispin01', data=coulomb_ints_imag)  
     group_integrals.create_dataset('coulomb_ints_ispin01', data=coulomb_ints_real)    
 
@@ -464,7 +464,7 @@ def write_exchange_integrals_HDF5(group_integrals, xints, ki, nkpts, nor, mappin
                         index_tri_ind, index_repeat = get_hande_index_exchange(i, j, k, i, ki, kj, kk, ki, nor, mapping)
                         if abs(v) > tol:
                             exchange_ints_real[index_tri_ind, index_repeat] = v.real
-                            exchange_ints_imag[index_tri_ind, index_repeat] = 0
+                            exchange_ints_imag[index_tri_ind, index_repeat] = v.imag
 
 def write_hcore(fout, h, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
     '''Write the <i|h|j> integrals to FCIDUMP file.
