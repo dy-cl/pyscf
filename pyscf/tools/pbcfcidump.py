@@ -238,7 +238,7 @@ def get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping):
         index = 2 * tri_ind(ia, jb) - 1 
     else:
         index = 2 * tri_ind(ia, jb) - 2
-    return index
+    return index, conj
 
 def get_hande_index_exchange(i, j, k, l, kp, kq, kr, ks, nor, mapping):
     ''' Calculate HANDE storage index of an exchange integral. 
@@ -285,7 +285,7 @@ def get_hande_index_exchange(i, j, k, l, kp, kq, kr, ks, nor, mapping):
 
     index_tri_ind = tri_ind(jj, aa) - 1 
     index_repeat = ii - 1
-    return index_tri_ind, index_repeat
+    return index_tri_ind, index_repeat, conj
 
 def write_eri(fout, eri, kconserv, tol=TOL,
               float_format=DEFAULT_FLOAT_FORMAT):
@@ -378,10 +378,13 @@ def write_eri_HDF5(group_integrals, eri, kconserv, mapping, tol=TOL):
                             for l in range(nor):
                                 # Stored as [ka,kc,kb,a,c,b,d] <- (ab|cd)
                                 v = get_eri(eri, kp, kq, kr, ks, i, j, k, l, no)
-                                index = get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping)
+                                index, conj = get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping)
                                 if abs(v) > tol:
                                     coulomb_ints_real[index] = v.real 
                                     coulomb_ints_imag[index] = v.imag
+                                    if conj:
+                                        coulomb_ints_imag[index] = -coulomb_ints_imag[index] 
+
     group_integrals.create_dataset('coulomb_ints_im_ispin01', data=coulomb_ints_imag)  
     group_integrals.create_dataset('coulomb_ints_ispin01', data=coulomb_ints_real)    
 
@@ -461,10 +464,12 @@ def write_exchange_integrals_HDF5(group_integrals, xints, ki, nkpts, nor, mappin
                 for j in range(nor):
                     for k in range(nor):
                         v = xints[i, kj*nor+j, kk*nor+k]/nkpts
-                        index_tri_ind, index_repeat = get_hande_index_exchange(i, j, k, i, ki, kj, kk, ki, nor, mapping)
+                        index_tri_ind, index_repeat, conj = get_hande_index_exchange(i, j, k, i, ki, kj, kk, ki, nor, mapping)
                         if abs(v) > tol:
                             exchange_ints_real[index_tri_ind, index_repeat] = v.real
                             exchange_ints_imag[index_tri_ind, index_repeat] = v.imag
+                            if conj:
+                                exchange_ints_imag[index_tri_ind, index_repeat] = -exchange_ints_imag[index_tri_ind, index_repeat]
 
 def write_hcore(fout, h, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
     '''Write the <i|h|j> integrals to FCIDUMP file.
@@ -910,10 +915,10 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                             JR = JI = KR = KI = 0.0
                             for ki in range(kps):
                                 for i in range(nmo):
-                                    j_idx = get_hande_index_coulomb(i, b, a, i, ki, k, k, ki, nmo, mapping)
+                                    j_idx, _ = get_hande_index_coulomb(i, b, a, i, ki, k, k, ki, nmo, mapping)
                                     JR += coulomb_ints_real[j_idx]
                                     JI += coulomb_ints_imag[j_idx]
-                                    tri, rep = get_hande_index_exchange(i, b, a, i, ki, k, k, ki, nmo, mapping)
+                                    tri, rep, _ = get_hande_index_exchange(i, b, a, i, ki, k, k, ki, nmo, mapping)
                                     KR += xints_real[tri, rep]
                                     KI += xints_imag[tri, rep]
                             delta[a, b] = -0.5*((KR - JR) + 1j*(KI - JI))
