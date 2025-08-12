@@ -914,11 +914,11 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                         for b in range(nmo):
                             JR = JI = KR = KI = 0.0
                             for ki in range(kps):
-                                for i in range(nmo):
-                                    j_idx, _ = get_hande_index_coulomb(i, b, a, i, ki, k, k, ki, nmo, mapping)
+                                for i in occ_k[ki]:
+                                    j_idx, conj = get_hande_index_coulomb(a, i, i, b, k, ki, ki, k, nmo, mapping)
                                     JR += coulomb_ints_real[j_idx]
                                     JI += coulomb_ints_imag[j_idx]
-                                    tri, rep, _ = get_hande_index_exchange(i, b, a, i, ki, k, k, ki, nmo, mapping)
+                                    tri, rep, conj = get_hande_index_exchange(a, i, i, b, k, ki, ki, k, nmo, mapping)
                                     KR += xints_real[tri, rep]
                                     KI += xints_imag[tri, rep]
                             delta[a, b] = -0.5*((KR - JR) + 1j*(KI - JI))
@@ -930,7 +930,7 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                         for i in range(j + 1):
                             hij = H[i, j]
                             re_upper.append(0.0 if abs(hij.real) < TOL else hij.real)
-                            im_upper.append(hij.imag)
+                            im_upper.append(-hij.imag)
                     group_integrals.create_dataset(f'one_body_ispin01_isym{isym:02d}', data=numpy.asarray(re_upper, dtype=numpy.float64))
                     group_integrals.create_dataset(f'one_body_im_ispin01_isym{isym:02d}', data=numpy.array(im_upper, dtype=numpy.float64))
                 group_read_in.create_dataset('nprop', data=numpy.array(nprop, dtype=numpy.int32))
