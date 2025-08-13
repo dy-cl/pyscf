@@ -912,16 +912,28 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                     delta = numpy.zeros_like(H, dtype=numpy.complex128)
                     for a in range(nmo):
                         for b in range(nmo):
-                            JR = JI = KR = KI = 0.0
+                            JR_all = JI_all = KR_all = KI_all = 0.0
+                            for ki in range(kps):
+                                for i in range(nmo):
+                                    j_idx, conj = get_hande_index_coulomb(a, i, i, b, k, ki, ki, k, nmo, mapping)
+                                    JR_all += coulomb_ints_real[j_idx]
+                                    JI_all += coulomb_ints_imag[j_idx]
+                                    tri, rep, conj = get_hande_index_exchange(a, i, i, b, k, ki, ki, k, nmo, mapping)
+                                    KR_all += xints_real[tri, rep]
+                                    KI_all += xints_imag[tri, rep]
+                            JR_occ = JI_occ = KR_occ = KI_occ = 0.0 
                             for ki in range(kps):
                                 for i in occ_k[ki]:
                                     j_idx, conj = get_hande_index_coulomb(a, i, i, b, k, ki, ki, k, nmo, mapping)
-                                    JR += coulomb_ints_real[j_idx]
-                                    JI += coulomb_ints_imag[j_idx]
+                                    JR_occ += coulomb_ints_real[j_idx]
+                                    JI_occ += coulomb_ints_imag[j_idx]
                                     tri, rep, conj = get_hande_index_exchange(a, i, i, b, k, ki, ki, k, nmo, mapping)
-                                    KR += xints_real[tri, rep]
-                                    KI += xints_imag[tri, rep]
-                            delta[a, b] = -0.5*((KR - JR) + 1j*(KI - JI))
+                                    KR_occ += xints_real[tri, rep]
+                                    KI_occ += xints_imag[tri, rep]
+                            if a == b:
+                                delta[a, b] = -0.5*((KR_all - JR_all) + 1j*(KI_all - JI_all))
+                            else:
+                                delta[a, b] = -0.5*((KR_occ - JR_occ) + 1j*(KI_occ - JI_occ))
                     H += delta 
                     isym = int(1 + (scaled_kpts[k,0]) + nprop[0]*scaled_kpts[k,1] + nprop[0]*nprop[1]*scaled_kpts[k,2])
                     re_upper = [] 
