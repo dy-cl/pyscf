@@ -33,7 +33,7 @@ from functools import reduce
 import copy
 import numpy
 import pyscf.pbc
-import datetime, uuid, h5py
+import datetime, uuid, h5py, time
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.cc.kccsd_rhf import KRCCSD
 try:  # P
@@ -335,59 +335,73 @@ def write_eri(fout, eri, kconserv, tol=TOL,
                                         nor*kr+k+1, nor*ks+l+1))
 
 def write_eri_HDF5(group_integrals, eri, kconserv, mapping, tol=TOL):
-    '''Write electron repulsion integrals (ERIs) to system .H5.
-    
-    Args:
-        group_integrals : h5py.Group 
-            HDF5 group which stores the integrals.
-        eri : numpy array
-            Contains ERIs divided by number of k points, with indices
-            [ka,kc,kb,a,c,b,d].
-        kconserv : function
-            Pass in three k point indices and get fourth one where
-            overall momentum is conserved.
-        mapping: dict
-            Maps the PySCF orbital indices to those seen by HANDE.
 
-    Kwargs:
-        tol : float, optional
-            Below this value integral is not written to file.
-            The default is TOL.
-    '''
     nkpts = eri.oooo.shape[0]
-    no = eri.oooo.shape[-1]
-    nv = eri.vvvv.shape[-1]
-    nor = no+nv
+    no = eri.oooo.shape[-1]; nv = eri.vvvv.shape[-1]; nor = no + nv
     nspat = len(mapping)
     nuniq = nspat * (nspat + 1) // 2
     npair = nuniq * (nuniq + 1) // 2
-    ntotal  = 2 * npair
-    coulomb_ints_real, coulomb_ints_imag = numpy.zeros((ntotal), dtype=numpy.float64), numpy.zeros((ntotal), dtype=numpy.float64)
+    ntotal = 2 * npair
+    total_iters = nkpts**3 * nor**4
+    chunk_size = 20_000_000
+    buffer_size = 20_000_000
+
+    data_re = group_integrals.create_dataset('coulomb_ints_ispin01', shape=(ntotal,), dtype=numpy.float64, chunks=(int(min(ntotal, chunk_size)),))
+    data_im = group_integrals.create_dataset('coulomb_ints_im_ispin01', shape=(ntotal,), dtype=numpy.float64, chunks=(int(min(ntotal, chunk_size)),))
+
+    idx_buffer, re_buffer, im_buffer = [], [], []
+
+    def flush():
+        # Is buffer empty?
+        if not idx_buffer:
+            return 
+        idx = numpy.asarray(idx_buffer, dtype=numpy.int64)
+        re = numpy.asarray(re_buffer, dtype=numpy.float64)
+        im = numpy.asarray(im_buffer, dtype=numpy.float64)
+        # Sort buffers by index
+        order = numpy.argsort(idx, kind = 'mergesort')
+        idx, re, im = idx[order], re[order], im[order]
+        # Remove duplicates
+        unique_idx, first_pos, counts = numpy.unique(idx, return_index=True, return_counts=True)
+        last_pos = first_pos + counts - 1
+        re_unique = re[last_pos]
+        im_unique = im[last_pos]
+
+        if unique_idx.size:
+            # Find the positions of non-contiguous indices 
+            cuts = numpy.flatnonzero(numpy.diff(unique_idx) != 1) + 1
+            starts = numpy.concatenate(([0], cuts))
+            ends = numpy.concatenate((cuts, [unique_idx.size]))
+            # Write contiguous blocks of data
+            for start, end in zip(starts, ends):
+                low = unique_idx[start]
+                high = unique_idx[end - 1] + 1  
+                data_re[low:high] = re_unique[start:end]
+                data_im[low:high] = im_unique[start:end]
+
+        idx_buffer.clear(); re_buffer.clear(); im_buffer.clear()
+    
+    iters = 0
     for kp in range(nkpts):
         for kq in range(nkpts):
+            print(f'Getting eris:  {100 *  iters /  total_iters}%', flush = True)
             for kr in range(nkpts):
                 ks = kconserv[kp, kq, kr]
-                # The documentation in pyscf/pbc/lib/kpts_helper.py in
-                # get_kconserv is inconsistent with the actual code (and
-                # physics). [k*(1) l(1) | m*(2) n(2)] = <km|ln> is the
-                # integral. kconserve gives n given klm, such that
-                # l-k=n-m (not k-l=n-m)
                 for i in range(nor):
                     for j in range(nor):
                         for k in range(nor):
                             for l in range(nor):
-                                # Stored as [ka,kc,kb,a,c,b,d] <- (ab|cd)
+                                iters += 1
                                 v = get_eri(eri, kp, kq, kr, ks, i, j, k, l, no)
-                                index, conj = get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping)
                                 if abs(v) > tol:
-                                    coulomb_ints_real[index] = v.real 
-                                    coulomb_ints_imag[index] = v.imag
-                                    if conj:
-                                        coulomb_ints_imag[index] = -coulomb_ints_imag[index] 
-
-    group_integrals.create_dataset('coulomb_ints_im_ispin01', data=coulomb_ints_imag)  
-    group_integrals.create_dataset('coulomb_ints_ispin01', data=coulomb_ints_real)    
-
+                                    index, conj = get_hande_index_coulomb(i, j, k, l, kp, kq, kr, ks, nor, mapping)
+                                    idx_buffer.append(index)
+                                    re_buffer.append(v.real)
+                                    im_buffer.append(-v.imag if conj else v.imag)
+                                    if len(idx_buffer) >= buffer_size:
+                                        print('Flushing to .H5 file.', flush = True)
+                                        flush()
+    flush()
 
 def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
                              float_format=DEFAULT_FLOAT_FORMAT):
@@ -791,6 +805,9 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 for k in range(kps)]
     if comm != None:
         kstart = comm.bcast(kstart, root=0)
+    if rank == 0:
+        print('Calculating and writing exchange integrals.', flush =  True)
+        t0 = time.perf_counter()
     if HDF5:
         if rank == 0:
             with h5py.File(fcid + '.H5', 'w') as f:
@@ -822,6 +839,8 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
     else:
         exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts, group_integrals=None, mapping=None, HDF5=False)
     if rank == 0:
+        t1 = time.perf_counter()
+        print(f'Calculating and writing exchange integrals took {t1 - t0} seconds.', flush =  True)
         if not HDF5:
             fx.close()
         # MP meshes with an even number of points in a dimension do not contain
@@ -835,7 +854,11 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
             for i in range(3):
                 if nprop[i] % 2 == 0:
                     nprop[i] *= 2
+        t0 = time.perf_counter()
+        print('Calculating coulomb integrals.', flush =  True)
         eris = dummy_cc.ao2mo()
+        t1 = time.perf_counter()
+        print(f'Calculating coulomb integrals took {t1 - t0} seconds.', flush =  True)
         nel = sum(sum(mf.mo_occ))
         orbsym = []
         propsc = 2**npropbitlen
@@ -844,6 +867,8 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 propsc*propsc*scaled_kpts[k, 2]
             orbsym += [int(n)]*nmo
         nkpts = kgrid[0]*kgrid[1]*kgrid[2]
+        t0 = time.perf_counter()
+        print('Writing coulomb integrals.', flush = True)
         if HDF5:
             with h5py.File(fcid + '.H5', 'a') as f:
                 group_metadata = f.create_group('/metadata')
@@ -962,3 +987,5 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                     f.write(' (%.16g,%.16g) %4d %4d %4d %4d\n' %
                             (e.real, e.imag, n, 0, 0, 0))
             f.close()
+        t1 = time.perf_counter()
+        print(f'Writing coulomb integrals took {t1 - t0} seconds.', flush = True)
