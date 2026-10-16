@@ -33,8 +33,11 @@ from functools import reduce
 import copy
 import numpy
 import pyscf.pbc
+from pyscf import lib
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.cc.kccsd_rhf import KRCCSD
+from pyscf.pbc.df import fft_ao2mo
+from pyscf.pbc.df.fft import FFTDF
 try:  # P
     from mpi4py import MPI  # P
     mpi4py_avail = True  # P
@@ -576,3 +579,107 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 f.write(' (%.16g,%.16g) %4d %4d %4d %4d\n' %
                         (e.real, e.imag, n, 0, 0, 0))
         f.close()
+
+
+def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
+    '''Dump Fourier coefficients of occupied-virtual orbital pair densities.
+
+    The coefficients C_i^a(G), with i occupied at k-point k_i and a virtual at
+    k-point k_a, are the Fourier coefficients of the cell-periodic pair density
+    exp(-i q.r) psi_i^*(r) psi_a(r), where q = k_a - k_i. They are used by HANDE
+    to evaluate the transition structure factor S(G) and are normalised such
+    that the two-electron integrals written by fcidump are
+
+        (ia|jb) = 1/Omega sum_G' 4 pi/|G+q|^2 C_i^a(G) C_j^b(G_iajb - G),
+
+    where G_iajb = k_i - k_a + k_j - k_b, Omega is the volume of the cell and the
+    G+q = 0 term is omitted. The same SCF calculation object must be used as for
+    fcidump so that both files use the same orbitals.
+
+    The file contains:
+        number of G vectors, number of channels, number of k-points
+        three lines with the lattice vectors (in Bohr)
+        the FFT mesh
+        nprop, i.e. the size of the integer k-point grid (see fcidump)
+        one line for each k-point with the k-point in units of 1/nprop
+        one line for each orbital with the orbital index (as in the FCIDUMP),
+            k-point index, k-point in units of 1/nprop and orbital energy
+        one line for each G vector with G in units of the reciprocal lattice
+            vectors followed by the real and imaginary parts of C_i^a(G) for
+            each channel.
+    Indices are 1-based. The channels are ordered by the pair of k-points
+    (k_i, k_a), then by i and then by a, with a running fastest.
+
+    Args:
+        cgd : str
+            Name of the file to write to.
+        mf : SCF calculation object
+            Stores SCF calculation results. The two electron integrals must
+            be evaluated using FFTDF.
+        kgrid : List of int
+            Number of k-points in each dimension.
+        scaled_kpts_in : Numpy array of floats
+            Scaled k-points, i.e. (.5,.5,.5) is at the very corner of
+            the BZ.
+        MP : bool
+            True if the grid used is a Monkhorst-Pack grid.
+        ke_cutoff : float
+            Only G vectors with |G|^2/2 <= ke_cutoff (in Hartree) are written.
+    '''
+
+    cell = mf.cell
+    if cell.dimension != 3:
+        raise NotImplementedError("CGDUMP is only implemented for 3D systems.")
+    if not isinstance(mf.with_df, FFTDF):
+        raise NotImplementedError("CGDUMP requires the two electron integrals "
+                                  "to be evaluated using FFTDF.")
+    nprop, scaled_kpts = _integer_kpts(kgrid, scaled_kpts_in, MP)
+    kpts = mf.kpts
+    nkpts = len(kpts)
+    nmo = mf.mo_coeff[0].shape[1]
+    nocc = numpy.count_nonzero(mf.mo_occ[0])
+    if any(numpy.count_nonzero(occ) != nocc for occ in mf.mo_occ):
+        raise NotImplementedError("CGDUMP requires the same number of occupied "
+                                  "orbitals at each k-point.")
+    nvir = nmo - nocc
+    nov = nocc*nvir
+    mesh = mf.with_df.mesh
+    Gv, Gvbase, _ = cell.get_Gv_weights(mesh)
+    # G vectors in units of the reciprocal lattice vectors, in the same order
+    # as the FFT grid.
+    gxyz = numpy.rint(lib.cartesian_prod(Gvbase)).astype(int)
+    keep = 0.5*numpy.einsum('gx,gx->g', Gv, Gv) <= ke_cutoff
+    gxyz = gxyz[keep]
+    # get_mo_pairs_G returns the unnormalised FFT. The FFTDF integrals are
+    # Omega/ngrids**2 sum_G rho_ia(G) coulG(G+q) rho_jb(G_iajb - G), which
+    # KRCCSD (and hence fcidump) divides by the number of k-points.
+    fac = cell.vol/(numpy.prod(mesh)*numpy.sqrt(nkpts))
+    cg = numpy.empty((len(gxyz), nkpts*nkpts*nov), dtype=numpy.complex128)
+    for ki in range(nkpts):
+        for ka in range(nkpts):
+            p0 = (ki*nkpts + ka)*nov
+            # The momentum transfer must be that between the k-points on the
+            # integer grid, which may differ from kpts[ka] - kpts[ki] by a
+            # reciprocal lattice vector.
+            q = cell.get_abs_kpts((scaled_kpts[ka] - scaled_kpts[ki])/nprop)
+            mo_pairs_G = fft_ao2mo.get_mo_pairs_G(
+                mf.with_df, (mf.mo_coeff[ki][:, :nocc], mf.mo_coeff[ka][:, nocc:]),
+                kpts=numpy.asarray((kpts[ki], kpts[ka])), q=q)
+            cg[:, p0:p0+nov] = fac*mo_pairs_G[keep]
+
+    with open(cgd, 'w') as fout:
+        fout.write('%d %d %d\n' % (len(gxyz), cg.shape[1], nkpts))
+        for a in cell.lattice_vectors():
+            fout.write('%.16g %.16g %.16g\n' % tuple(a))
+        fout.write('%d %d %d\n' % tuple(mesh))
+        fout.write('%d %d %d\n' % tuple(nprop))
+        for k in range(nkpts):
+            fout.write('%d %d %d\n' % tuple(scaled_kpts[k]))
+        for k in range(nkpts):
+            for p, e in enumerate(mf.mo_energy[k]):
+                fout.write('%d %d %d %d %d %.16g\n' %
+                           ((nmo*k+p+1, k+1) + tuple(scaled_kpts[k]) + (e,)))
+        for g, c in zip(gxyz, cg):
+            fout.write('%d %d %d' % tuple(g))
+            fout.write(''.join(' %.16g %.16g' % (x.real, x.imag) for x in c))
+            fout.write('\n')
