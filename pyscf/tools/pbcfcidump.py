@@ -334,6 +334,45 @@ def _partition(part, rank, nmo, size, nkpts, ntot):  # p
     return nar, l, dspls, counts  # p
 
 
+def _integer_kpts(kgrid, scaled_kpts_in, MP):
+    '''Express the k-points as integers on the k-point grid.
+
+    Args:
+        kgrid : List of int
+            Number of k-points in each dimension.
+        scaled_kpts_in : Numpy array of floats
+            Scaled k-points, i.e. (.5,.5,.5) is at the very corner of
+            the BZ.
+        MP : bool
+            True if the grid used is a Monkhorst-Pack grid.
+
+    Returns:
+        nprop : List of int
+            Size of the integer k-point grid in each dimension.
+        scaled_kpts : Numpy array of floats
+            k-points in units of 1/nprop, in the range [0, nprop).
+    '''
+    # scaled_kpts will be modified later so make copy.
+    # [todo] - more deepcopying needed?
+    scaled_kpts = copy.deepcopy(scaled_kpts_in)
+    nprop = list(kgrid)
+    # MP meshes with an even number of points in a dimension do not contain
+    # the Gamma point.
+    # Unfortunately this is not compatible with some symmetry
+    # specifications, so if we multiply that dimension's kpoint grid by 2,
+    # we get a grid which can contain both the MP mesh and the Gamma point
+    # (even though we don't have any actual orbitals calculated at the
+    # gamma point).
+    if MP:
+        for i in range(3):
+            if nprop[i] % 2 == 0:
+                nprop[i] *= 2
+    for i, nk in enumerate(nprop):
+        for j in range(scaled_kpts.shape[0]):
+            scaled_kpts[j, i] = int(round(scaled_kpts[j, i]*nk)) % nk
+    return nprop, scaled_kpts
+
+
 def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts):
     '''Calculate <pi|iq>_x exchange integrals.
 
@@ -476,13 +515,9 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         comm = MPI.COMM_WORLD  # P
     else:  # P
         comm = None  # P
-    # scaled_kpts will be modified later so make copy.
-    # [todo] - more deepcopying needed?
-    scaled_kpts = copy.deepcopy(scaled_kpts_in)
     dummy_cc = KRCCSD(mf)
     # If keep_exxdiv, keeping exxdiv used in scf calculation.
     dummy_cc.keep_exxdiv = keep_exxdiv
-    nprop = list(kgrid)
 
     if comm == None:  # P
         rank = 0
@@ -509,21 +544,8 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
     exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts)
     if rank == 0:
         fx.close()
-        # MP meshes with an even number of points in a dimension do not contain
-        # the Gamma point.
-        # Unfortunately this is not compatible with some symmetry
-        # specifications, so if we multiply that dimension's kpoint grid by 2,
-        # we get a grid which can contain both the MP mesh and the Gamma point
-        # (even though we don't have any actual orbitals calculated at the
-        # gamma point).
-        if MP:
-            for i in range(3):
-                if nprop[i] % 2 == 0:
-                    nprop[i] *= 2
+        nprop, scaled_kpts = _integer_kpts(kgrid, scaled_kpts_in, MP)
         npropbitlen = 8
-        for i, nk in enumerate(nprop):
-            for j in range(scaled_kpts.shape[0]):
-                scaled_kpts[j, i] = int(round(scaled_kpts[j, i]*nk)) % nk
         kps = len(mf.mo_coeff)
         # For each k-point, get the G-space core hamiltonian, and transform it
         # into the molecular orbital basis.
