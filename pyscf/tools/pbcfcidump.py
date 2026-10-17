@@ -31,6 +31,8 @@ These can be written in the same format as an FCIDUMP file, but without a header
 '''
 from functools import reduce
 import copy
+import os
+import shutil
 import numpy
 import pyscf.pbc
 from pyscf import lib
@@ -193,7 +195,7 @@ def write_eri(fout, eri, kconserv, tol=TOL,
 
 
 def write_eri_kpts(fout, mf, khelper, tol=TOL,
-                   float_format=DEFAULT_FLOAT_FORMAT):
+                   float_format=DEFAULT_FLOAT_FORMAT, rank=0, size=1):
     '''Calculate and write electron repulsion integrals (ERIs) to FCIDUMP.
 
     The ERIs are calculated for each set of symmetry-unique k-points and
@@ -215,6 +217,11 @@ def write_eri_kpts(fout, mf, khelper, tol=TOL,
         float_format : str, optional
             Format of integral for writing.
             The default is DEFAULT_FLOAT_FORMAT.
+        rank, size : int, optional
+            Only every size-th set of symmetry-unique k-points, starting from
+            the rank-th, is written, so that the ERIs can be divided between
+            processes.
+            The defaults are 0 and 1.
     '''
     output_format = float_format + ' %4d %4d %4d %4d\n'
     kpts = mf.kpts
@@ -223,7 +230,9 @@ def write_eri_kpts(fout, mf, khelper, tol=TOL,
     nor = mo_coeff[0].shape[1]
     # (1-based) orbital indices within a k-point of each element of an ERI.
     idx = numpy.indices((nor,)*4).reshape(4, -1) + 1
-    for (ikp, ikq, ikr), kpt_list in khelper.symm_map.items():
+    for n, ((ikp, ikq, ikr), kpt_list) in enumerate(khelper.symm_map.items()):
+        if n % size != rank:  # P
+            continue  # P
         iks = khelper.kconserv[ikp, ikq, ikr]
         eri_kpt = mf.with_df.ao2mo((mo_coeff[ikp], mo_coeff[ikq], mo_coeff[ikr], mo_coeff[iks]),
                                    (kpts[ikp], kpts[ikq], kpts[ikr], kpts[iks]), compact=False)
@@ -573,8 +582,10 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
 
     if comm == None:  # P
         rank = 0
+        size = 1
     else:  # P
         rank = comm.Get_rank()  # P
+        size = comm.Get_size()  # P
     kconserv = dummy_cc.khelper.kconserv
     nmo = len(mf.mo_coeff[0])
     fx = None
@@ -594,6 +605,13 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
     if comm != None:
         kstart = comm.bcast(kstart, root=0)
     exchange_integrals(comm, mf, nmo, kconserv, fx, kstart, mf.kpts)
+    dummy_cc.khelper.build_symm_map()
+    if comm != None:  # P
+        # Each process writes the ERIs for a share of the symmetry-unique sets  # P
+        # of k-points to its own file, which are joined into fcid below.  # P
+        with open('%s_ERI%d' % (fcid, rank), 'w') as feri:  # P
+            write_eri_kpts(feri, mf, dummy_cc.khelper, rank=rank, size=size)  # P
+        comm.Barrier()  # P
     if rank == 0:
         fx.close()
         nprop, scaled_kpts = _integer_kpts(kgrid, scaled_kpts_in, MP)
@@ -619,8 +637,13 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         # written rather than stored for all k-points.
         with open(fcid, 'w') as fout:
             write_head(fout, kps*nmo, nel, 0, nprop, npropbitlen, orbsym=orbsym)
-            dummy_cc.khelper.build_symm_map()
-            write_eri_kpts(fout, mf, dummy_cc.khelper)
+            if comm == None:  # P
+                write_eri_kpts(fout, mf, dummy_cc.khelper)
+            else:  # P
+                for r in range(size):  # P
+                    with open('%s_ERI%d' % (fcid, r)) as feri:  # P
+                        shutil.copyfileobj(feri, fout)  # P
+                    os.remove('%s_ERI%d' % (fcid, r))  # P
             write_hcore(fout, h1es)
             output_format = DEFAULT_FLOAT_FORMAT + '  0  0  0  0\n'
             fout.write(output_format % (nkpts*mf.mol.energy_nuc(), 0))
