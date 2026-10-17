@@ -590,20 +590,26 @@ def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
     to evaluate the transition structure factor S(G) and are normalised such
     that the two-electron integrals written by fcidump are
 
-        (ia|jb) = 1/Omega sum_G' 4 pi/|G+q|^2 C_i^a(G) C_j^b(G_iajb - G),
+        (ia|jb) = 1/Omega sum_G v(G+q) C_i^a(G) C_j^b(G_iajb - G),
 
-    where G_iajb = k_i - k_a + k_j - k_b, Omega is the volume of the cell and the
-    G+q = 0 term is omitted. The same SCF calculation object must be used as for
-    fcidump so that both files use the same orbitals.
+    where G_iajb = k_i - k_a + k_j - k_b, Omega is the volume of the cell and v is
+    the Coulomb kernel used by FFTDF (see pyscf.pbc.tools.get_coulG), i.e.
+    4 pi/|G+q|^2 with G+q wrapped into the box of half-width mesh//2+0.5 reciprocal
+    lattice vectors and zero for G+q = 0 and on the edge of the box. The same SCF
+    calculation object must be used as for fcidump so that both files use the same
+    orbitals.
 
     The file contains:
         number of G vectors, number of channels, number of k-points
         three lines with the lattice vectors (in Bohr)
         the FFT mesh
         nprop, i.e. the size of the integer k-point grid (see fcidump)
-        one line for each k-point with the k-point in units of 1/nprop
+        one line for each k-point with the k-point used to evaluate the
+            coefficients in units of 1/nprop, which is not reduced into the
+            range [0, nprop) so that differences between k-points give q
         one line for each orbital with the orbital index (as in the FCIDUMP),
-            k-point index, k-point in units of 1/nprop and orbital energy
+            k-point index, k-point in units of 1/nprop as in the ORBSYM of the
+            FCIDUMP and orbital energy
         one line for each G vector with G in units of the reciprocal lattice
             vectors followed by the real and imaginary parts of C_i^a(G) for
             each channel.
@@ -636,6 +642,13 @@ def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
     nprop, scaled_kpts = _integer_kpts(kgrid, scaled_kpts_in, MP)
     kpts = mf.kpts
     nkpts = len(kpts)
+    # The k-points used to evaluate the coefficients on the integer k-point
+    # grid. Unlike scaled_kpts, these are not reduced into the range
+    # [0, nprop), as the momentum transfer between them must match that used
+    # in the two electron integrals.
+    kpts_int = numpy.rint(cell.get_scaled_kpts(kpts)*nprop).astype(int)
+    if numpy.any((kpts_int - scaled_kpts) % nprop != 0):
+        raise ValueError("k-points of the SCF calculation are not on the k-point grid.")
     nmo = mf.mo_coeff[0].shape[1]
     nocc = numpy.count_nonzero(mf.mo_occ[0])
     if any(numpy.count_nonzero(occ) != nocc for occ in mf.mo_occ):
@@ -658,13 +671,9 @@ def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
     for ki in range(nkpts):
         for ka in range(nkpts):
             p0 = (ki*nkpts + ka)*nov
-            # The momentum transfer must be that between the k-points on the
-            # integer grid, which may differ from kpts[ka] - kpts[ki] by a
-            # reciprocal lattice vector.
-            q = cell.get_abs_kpts((scaled_kpts[ka] - scaled_kpts[ki])/nprop)
             mo_pairs_G = fft_ao2mo.get_mo_pairs_G(
                 mf.with_df, (mf.mo_coeff[ki][:, :nocc], mf.mo_coeff[ka][:, nocc:]),
-                kpts=numpy.asarray((kpts[ki], kpts[ka])), q=q)
+                kpts=numpy.asarray((kpts[ki], kpts[ka])))
             cg[:, p0:p0+nov] = fac*mo_pairs_G[keep]
 
     with open(cgd, 'w') as fout:
@@ -674,7 +683,7 @@ def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
         fout.write('%d %d %d\n' % tuple(mesh))
         fout.write('%d %d %d\n' % tuple(nprop))
         for k in range(nkpts):
-            fout.write('%d %d %d\n' % tuple(scaled_kpts[k]))
+            fout.write('%d %d %d\n' % tuple(kpts_int[k]))
         for k in range(nkpts):
             for p, e in enumerate(mf.mo_energy[k]):
                 fout.write('%d %d %d %d %d %.16g\n' %
