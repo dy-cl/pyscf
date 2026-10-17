@@ -28,6 +28,12 @@ It also calculates modified exchange integrals using the truncated exchange
 treatment which differ from the exchange using the bare Coulomb interaction.
 These can be written in the same format as an FCIDUMP file, but without a header.
 
+The FCIDUMP (and exchange integral) files can also be written as HDF5 files,
+which contain the same information: the variables in the header as datasets of
+the same name (NORB, NELEC, MS2, ORBSYM, NPROP, PROPBITLEN and ISYM) and each
+line of integrals as a row of the datasets integral_index (the four orbital
+indices), integral and integral_im (the real and imaginary parts).
+
 '''
 from functools import reduce
 import copy
@@ -54,11 +60,42 @@ TOL = 1e-10
 MOLPRO_ORBSYM = False
 
 
+def _create_hdf5_integrals(f):
+    '''Create the (empty) datasets of integrals in an HDF5 FCIDUMP file.'''
+    f.create_dataset('integral_index', (0, 4), maxshape=(None, 4),
+                     dtype=numpy.int32, chunks=(8192, 4))
+    f.create_dataset('integral', (0,), maxshape=(None,), dtype=numpy.float64,
+                     chunks=(8192,))
+    f.create_dataset('integral_im', (0,), maxshape=(None,), dtype=numpy.float64,
+                     chunks=(8192,))
+
+
+def _append_hdf5_integrals(f, v, idx):
+    '''Append integrals to an HDF5 FCIDUMP file.
+
+    Args:
+        f : h5py.File
+            HDF5 FCIDUMP file.
+        v : numpy array of complex
+            Integrals.
+        idx : numpy array of ints with dimensions (4, len(v))
+            (1-based) orbital indices of each integral, in the order in which
+            they are written to a text FCIDUMP file.
+    '''
+    n0 = f['integral'].shape[0]
+    n = n0 + len(v)
+    for name in ('integral_index', 'integral', 'integral_im'):
+        f[name].resize(n, axis=0)
+    f['integral_index'][n0:] = numpy.asarray(idx).T
+    f['integral'][n0:] = v.real
+    f['integral_im'][n0:] = v.imag
+
+
 def write_head(fout, nmo, nelec, ms, nprop, propbitlen, orbsym=None):
     '''Write header of FCIDUMP file.
 
     Args:
-        fout : file
+        fout : file or h5py.File
             FCIDUMP file.
         nmo : int
             Number of (molecular) orbitals.
@@ -86,6 +123,18 @@ def write_head(fout, nmo, nelec, ms, nprop, propbitlen, orbsym=None):
     if not isinstance(nelec, (int, numpy.number)):
         ms = abs(nelec[0] - nelec[1])
         nelec = nelec[0] + nelec[1]
+    if isinstance(fout, h5py.Group):
+        if orbsym is None or len(orbsym) == 0:
+            orbsym = [1]*nmo
+        fout['NORB'] = numpy.int32(nmo)
+        fout['NELEC'] = numpy.int32(nelec)
+        fout['MS2'] = numpy.int32(ms)
+        fout['ORBSYM'] = numpy.asarray(orbsym, dtype=numpy.int64)
+        fout['NPROP'] = numpy.asarray(nprop, dtype=numpy.int32)
+        fout['PROPBITLEN'] = numpy.int32(propbitlen)
+        fout['ISYM'] = numpy.int32(1)
+        _create_hdf5_integrals(fout)
+        return
     fout.write(' &FCI NORB=%4d,NELEC=%2d,MS2=%d,\n' % (nmo, nelec, ms))
     if orbsym is not None and len(orbsym) > 0:
         fout.write('  ORBSYM=%s\n' % ','.join([str(x) for x in orbsym]))
@@ -204,7 +253,7 @@ def write_eri_kpts(fout, mf, khelper, tol=TOL,
     ERIs need not be stored for all k-points at once.
 
     Args:
-        fout : file
+        fout : file or h5py.File
             FCIDUMP file.
         mf : SCF calculation object
             Stores SCF calculation results.
@@ -245,6 +294,9 @@ def write_eri_kpts(fout, mf, khelper, tol=TOL,
             # (pq|rs) with p, q, r and s at kp, kq, kr and ks.
             v = khelper.transform_symm(eri_kpt, kp, kq, kr).ravel()
             keep = numpy.abs(v) > tol
+            if isinstance(fout, h5py.Group):
+                _append_hdf5_integrals(fout, v[keep], idx[:, keep] + nor*numpy.array([[kp], [kq], [kr], [ks]]))
+                continue
             rows = zip(v.real[keep].tolist(), v.imag[keep].tolist(),
                        (idx[0, keep] + nor*kp).tolist(), (idx[1, keep] + nor*kq).tolist(),
                        (idx[2, keep] + nor*kr).tolist(), (idx[3, keep] + nor*ks).tolist())
@@ -256,7 +308,7 @@ def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
     '''Write extra exchange electron repulsion integrals to FCIDUMP.
 
     Args:
-        fout : file
+        fout : file or h5py.File
             FCIDUMP file.
         xints : numpy array, dim: (MO at k point, all MO, all MO)
             extra exchange integrals <pi|iq>_x
@@ -275,6 +327,14 @@ def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
             Format of integral for writing.
             The default is DEFAULT_FLOAT_FORMAT.
     '''
+    if isinstance(fout, h5py.Group):
+        # As below, i.e. in the order (kj, kk, i, j, k).
+        v = xints.reshape(nor, nkpts, nor, nkpts, nor).transpose(1, 3, 0, 2, 4).ravel()/nkpts
+        kj, kk, i, j, k = numpy.indices((nkpts, nkpts, nor, nor, nor)).reshape(5, -1)
+        keep = numpy.abs(v) > tol
+        _append_hdf5_integrals(fout, v[keep], (nor*ki+i[keep]+1, nor*kj[keep]+j[keep]+1,
+                                               nor*kk[keep]+k[keep]+1, nor*ki+i[keep]+1))
+        return
     output_format = float_format + ' %4d %4d %4d %4d\n'
     for kj in range(nkpts):
         for kk in range(nkpts):
@@ -294,7 +354,7 @@ def write_hcore(fout, h, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
     Note that <i|h|j> == 0 unless i and j are on the same k point.
 
     Args:
-        fout : file
+        fout : file or h5py.File
             FCIDUMP file
         h : array with dimensions (nkpoints, nmo, nmo) [todo] - check
             The <i|h|j> integrals for each kpoint.
@@ -307,6 +367,17 @@ def write_hcore(fout, h, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
             Format of integral for writing.
             The default is DEFAULT_FLOAT_FORMAT.
     '''
+    if isinstance(fout, h5py.Group):
+        # As below, i.e. <i|h|j> for j <= i at each k-point in turn.
+        nmos = 1
+        for hk in h:
+            i, j = numpy.tril_indices(hk.shape[0])
+            v = hk[i, j]
+            keep = numpy.abs(v) > tol
+            zero = numpy.zeros(numpy.count_nonzero(keep), dtype=int)
+            _append_hdf5_integrals(fout, v[keep], (i[keep]+nmos, j[keep]+nmos, zero, zero))
+            nmos += hk.shape[0]
+        return
     # [todo] - is something like hk.reshape(nmo, nmo) required?
     output_format = float_format + ' %4d %4d  0  0\n'
     nmos = 1
@@ -448,7 +519,7 @@ def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts):
         kconserv : function
             Pass in three k point indices and get fourth one where
             overall momentum is conserved.
-        fout : file
+        fout : file or h5py.File
             FCIDUMP file
         kstart : int
             Next k point to calculation exchange integral for.
@@ -542,7 +613,7 @@ def exchange_integrals(comm, mf, nmo, kconserv, fout, kstart, kpts):
 
 
 def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False,
-            parallel=None):
+            parallel=None, hdf5=False):
     '''Dump constant term, orb energies, 1-e and 2-e integrals to file.
 
     Args:
@@ -569,6 +640,9 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         parallel : bool
             If True, MPI parallelization will be used.
             The default is False.
+        hdf5 : bool
+            If True, write HDF5 files rather than text files (see above).
+            The default is False.
     '''
 
     if parallel:  # P
@@ -592,7 +666,13 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
     fx = None
     kstart = None
     if rank == 0:
-        if resume:
+        if resume and hdf5:
+            raise NotImplementedError("Resuming is not implemented for HDF5 files.")
+        if hdf5:
+            fx = h5py.File(fcid+"_X", 'w')
+            _create_hdf5_integrals(fx)
+            kstart = 0
+        elif resume:
             fx = open(fcid+"_X", 'r')
             lines = fx.readlines()
             line = lines[-1].split()
@@ -610,8 +690,13 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
     if comm != None:  # P
         # Each process writes the ERIs for a share of the symmetry-unique sets  # P
         # of k-points to its own file, which are joined into fcid below.  # P
-        with open('%s_ERI%d' % (fcid, rank), 'w') as feri:  # P
-            write_eri_kpts(feri, mf, dummy_cc.khelper, rank=rank, size=size)  # P
+        if hdf5:  # P
+            with h5py.File('%s_ERI%d' % (fcid, rank), 'w') as feri:  # P
+                _create_hdf5_integrals(feri)  # P
+                write_eri_kpts(feri, mf, dummy_cc.khelper, rank=rank, size=size)  # P
+        else:  # P
+            with open('%s_ERI%d' % (fcid, rank), 'w') as feri:  # P
+                write_eri_kpts(feri, mf, dummy_cc.khelper, rank=rank, size=size)  # P
         comm.Barrier()  # P
     if rank == 0:
         fx.close()
@@ -636,6 +721,23 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         nkpts = kgrid[0]*kgrid[1]*kgrid[2]
         # As in from_integrals, but with the ERIs calculated as they are
         # written rather than stored for all k-points.
+        if hdf5:
+            with h5py.File(fcid, 'w') as fout:
+                write_head(fout, kps*nmo, nel, 0, nprop, npropbitlen, orbsym=orbsym)
+                if comm == None:  # P
+                    write_eri_kpts(fout, mf, dummy_cc.khelper)
+                else:  # P
+                    for r in range(size):  # P
+                        with h5py.File('%s_ERI%d' % (fcid, r), 'r') as feri:  # P
+                            v = feri['integral'][()] + 1j*feri['integral_im'][()]  # P
+                            _append_hdf5_integrals(fout, v, feri['integral_index'][()].T)  # P
+                        os.remove('%s_ERI%d' % (fcid, r))  # P
+                write_hcore(fout, h1es)
+                # Core energy and orbital energies, as in the text file below.
+                zero = numpy.zeros(nkpts*nmo + 1, dtype=int)
+                v = numpy.concatenate([[nkpts*mf.mol.energy_nuc()]] + list(mf.mo_energy))
+                _append_hdf5_integrals(fout, v, (numpy.arange(nkpts*nmo + 1), zero, zero, zero))
+            return
         with open(fcid, 'w') as fout:
             write_head(fout, kps*nmo, nel, 0, nprop, npropbitlen, orbsym=orbsym)
             if comm == None:  # P
