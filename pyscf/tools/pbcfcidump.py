@@ -34,6 +34,7 @@ import copy
 import os
 import shutil
 import numpy
+import h5py
 import pyscf.pbc
 from pyscf import lib
 from pyscf.pbc.lib import kpts_helper
@@ -658,7 +659,7 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
         f.close()
 
 
-def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
+def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff, hdf5=False):
     '''Dump Fourier coefficients of occupied-virtual orbital pair densities.
 
     The coefficients C_i^a(G), with i occupied at k-point k_i and a virtual at
@@ -693,6 +694,13 @@ def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
     Indices are 1-based. The channels are ordered by the pair of k-points
     (k_i, k_a), then by i and then by a, with a running fastest.
 
+    Alternatively, the same information is written to an HDF5 file containing
+    the datasets lattice (lattice vectors), mesh, nprop, kpts (k-points),
+    orb_kpt (k-point index of each orbital), orb_kpoint_vector (k-point of each
+    orbital in units of 1/nprop), orb_energy, gvecs (G vectors) and coeffs and
+    coeffs_im (real and imaginary parts of C_i^a(G), with shape
+    (number of channels, number of G vectors)).
+
     Args:
         cgd : str
             Name of the file to write to.
@@ -708,6 +716,11 @@ def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
             True if the grid used is a Monkhorst-Pack grid.
         ke_cutoff : float
             Only G vectors with |G|^2/2 <= ke_cutoff (in Hartree) are written.
+
+    Kwargs:
+        hdf5 : bool
+            If True, write an HDF5 file rather than a text file.
+            The default is False.
     '''
 
     cell = mf.cell
@@ -745,13 +758,33 @@ def cgdump(cgd, mf, kgrid, scaled_kpts_in, MP, ke_cutoff):
     # KRCCSD (and hence fcidump) divides by the number of k-points.
     fac = cell.vol/(numpy.prod(mesh)*numpy.sqrt(nkpts))
     cg = numpy.empty((len(gxyz), nkpts*nkpts*nov), dtype=numpy.complex128)
+    # Contiguous copies, as get_mo_pairs_G cannot use slices of MO coefficients
+    # in C order (e.g. as loaded from a chkfile).
+    orbo = [numpy.asarray(mo[:, :nocc], order='C') for mo in mf.mo_coeff]
+    orbv = [numpy.asarray(mo[:, nocc:], order='C') for mo in mf.mo_coeff]
     for ki in range(nkpts):
         for ka in range(nkpts):
             p0 = (ki*nkpts + ka)*nov
             mo_pairs_G = fft_ao2mo.get_mo_pairs_G(
-                mf.with_df, (mf.mo_coeff[ki][:, :nocc], mf.mo_coeff[ka][:, nocc:]),
+                mf.with_df, (orbo[ki], orbv[ka]),
                 kpts=numpy.asarray((kpts[ki], kpts[ka])))
             cg[:, p0:p0+nov] = fac*mo_pairs_G[keep]
+
+    if hdf5:
+        # Integers are written as 32-bit integers, as read by HANDE.
+        i32 = numpy.int32
+        with h5py.File(cgd, 'w') as f:
+            f['lattice'] = cell.lattice_vectors()
+            f['mesh'] = numpy.asarray(mesh, dtype=i32)
+            f['nprop'] = numpy.asarray(nprop, dtype=i32)
+            f['kpts'] = kpts_int.astype(i32)
+            f['orb_kpt'] = numpy.repeat(numpy.arange(nkpts, dtype=i32) + 1, nmo)
+            f['orb_kpoint_vector'] = numpy.repeat(scaled_kpts, nmo, axis=0).astype(i32)
+            f['orb_energy'] = numpy.concatenate(mf.mo_energy)
+            f['gvecs'] = gxyz.astype(i32)
+            f['coeffs'] = cg.real.T
+            f['coeffs_im'] = cg.imag.T
+        return
 
     with open(cgd, 'w') as fout:
         fout.write('%d %d %d\n' % (len(gxyz), cg.shape[1], nkpts))
