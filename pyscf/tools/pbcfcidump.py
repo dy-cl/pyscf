@@ -192,6 +192,55 @@ def write_eri(fout, eri, kconserv, tol=TOL,
                                         nor*kr+k+1, nor*ks+l+1))
 
 
+def write_eri_kpts(fout, mf, khelper, tol=TOL,
+                   float_format=DEFAULT_FLOAT_FORMAT):
+    '''Calculate and write electron repulsion integrals (ERIs) to FCIDUMP.
+
+    The ERIs are calculated for each set of symmetry-unique k-points and
+    written for all sets of k-points related to it by symmetry, so that the
+    ERIs need not be stored for all k-points at once.
+
+    Args:
+        fout : file
+            FCIDUMP file.
+        mf : SCF calculation object
+            Stores SCF calculation results.
+        khelper : KptsHelper object
+            k-point symmetry information for the k-points of mf.
+
+    Kwargs:
+        tol : float, optional
+            Below this value integral is not written to file.
+            The default is TOL.
+        float_format : str, optional
+            Format of integral for writing.
+            The default is DEFAULT_FLOAT_FORMAT.
+    '''
+    output_format = float_format + ' %4d %4d %4d %4d\n'
+    kpts = mf.kpts
+    nkpts = len(kpts)
+    mo_coeff = mf.mo_coeff
+    nor = mo_coeff[0].shape[1]
+    # (1-based) orbital indices within a k-point of each element of an ERI.
+    idx = numpy.indices((nor,)*4).reshape(4, -1) + 1
+    for (ikp, ikq, ikr), kpt_list in khelper.symm_map.items():
+        iks = khelper.kconserv[ikp, ikq, ikr]
+        eri_kpt = mf.with_df.ao2mo((mo_coeff[ikp], mo_coeff[ikq], mo_coeff[ikr], mo_coeff[iks]),
+                                   (kpts[ikp], kpts[ikq], kpts[ikr], kpts[iks]), compact=False)
+        eri_kpt = eri_kpt.reshape((nor,)*4) / nkpts
+        # A set of k-points may be related to itself by symmetry, in which case
+        # it appears more than once in kpt_list.
+        for (kp, kq, kr) in dict.fromkeys(kpt_list):
+            ks = khelper.kconserv[kp, kq, kr]
+            # (pq|rs) with p, q, r and s at kp, kq, kr and ks.
+            v = khelper.transform_symm(eri_kpt, kp, kq, kr).ravel()
+            keep = numpy.abs(v) > tol
+            rows = zip(v.real[keep].tolist(), v.imag[keep].tolist(),
+                       (idx[0, keep] + nor*kp).tolist(), (idx[1, keep] + nor*kq).tolist(),
+                       (idx[2, keep] + nor*kr).tolist(), (idx[3, keep] + nor*ks).tolist())
+            fout.write(''.join([output_format % row for row in rows]))
+
+
 def write_exchange_integrals(fout, xints, ki, nkpts, nor, tol=TOL,
                              float_format=DEFAULT_FLOAT_FORMAT):
     '''Write extra exchange electron repulsion integrals to FCIDUMP.
@@ -558,7 +607,6 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                        (numpy.asarray(mf.mo_coeff)[k].T.conj(),
                         mf.get_hcore()[k], numpy.asarray(mf.mo_coeff)[k]))
                 for k in range(kps)]
-        eris = dummy_cc.ao2mo()
         nel = sum(sum(mf.mo_occ))
         orbsym = []
         propsc = 2**npropbitlen
@@ -567,9 +615,15 @@ def fcidump(fcid, mf, kgrid, scaled_kpts_in, MP, keep_exxdiv=False, resume=False
                 propsc*propsc*scaled_kpts[k, 2]
             orbsym += [int(n)]*nmo
         nkpts = kgrid[0]*kgrid[1]*kgrid[2]
-        from_integrals(fcid, h1es, eris, kps*nmo, nel, kconserv,
-                       nkpts*mf.mol.energy_nuc(), 0, nprop, npropbitlen,
-                       orbsym=orbsym)
+        # As in from_integrals, but with the ERIs calculated as they are
+        # written rather than stored for all k-points.
+        with open(fcid, 'w') as fout:
+            write_head(fout, kps*nmo, nel, 0, nprop, npropbitlen, orbsym=orbsym)
+            dummy_cc.khelper.build_symm_map()
+            write_eri_kpts(fout, mf, dummy_cc.khelper)
+            write_hcore(fout, h1es)
+            output_format = DEFAULT_FLOAT_FORMAT + '  0  0  0  0\n'
+            fout.write(output_format % (nkpts*mf.mol.energy_nuc(), 0))
         # Write orbital energies to fcid file, too.
         f = open(fcid, 'a')
         n = 0
